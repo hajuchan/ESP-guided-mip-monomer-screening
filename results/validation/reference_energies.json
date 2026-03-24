@@ -1,0 +1,22 @@
+{
+  "metadata": {
+    "compute_date": "2026-03-24T15:46:11.998305",
+    "dft_level": "wB97M-V/def2-TZVP",
+    "bsse_corrected": true,
+    "search_mode": "quantumdock"
+  },
+  "singh2012": {
+    "heptachlor_MAA": {
+      "bsse_dE": -14.322,
+      "raw_dE": -19.062,
+      "solvent": "Chloroform",
+      "best_direction": "site_3",
+      "search_info": {
+        "n_orientations": 240,
+        "xtb_best_sp": -6.499
+      }
+    }
+  },
+  "mukasa2023": {},
+  "gallic_acid": {}
+}

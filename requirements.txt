@@ -1,0 +1,13 @@
+rdkit
+tblite
+pyscf>=2.4.0
+dftd3
+gpu4pyscf
+openmm
+openmmforcefields
+openff-toolkit
+mdtraj
+numpy
+pandas
+matplotlib
+scipy

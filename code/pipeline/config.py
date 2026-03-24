@@ -1,0 +1,119 @@
+"""
+MIP Screening Pipeline Configuration
+=====================================
+Template, monomer, interferent, and solvent settings for
+computational screening of functional monomers.
+"""
+
+# ── Template ─────────────────────────────────────────────────────────
+TEMPLATE_NAME = "Phenylalanine"
+TEMPLATE_SMILES = "N[C@@H](Cc1ccccc1)C(=O)O"  # L-Phenylalanine
+
+# ── Monomer Library ──────────────────────────────────────────────────
+# {name: SMILES}  — covers common MIP functional monomers
+MONOMER_LIBRARY = {
+    "MAA":     "CC(=C)C(=O)O",          # Methacrylic acid
+    "4VP":     "C(=C)c1ccncc1",          # 4-Vinylpyridine
+    "OPD":     "Nc1ccccc1N",             # o-Phenylenediamine
+    "ACM":     "C=CC(N)=O",              # Acrylamide
+    "PYR":     "c1cc[nH]c1",             # Pyrrole
+    "4VB":     "C=Cc1ccc(B(O)O)cc1",     # 4-Vinylphenylboronic acid
+    "APB":     "Nc1ccc(cc1)B(O)O",       # 3-Aminophenylboronic acid
+    "Styrene": "C=Cc1ccccc1",            # Styrene
+    "AA":      "C=CC(=O)O",              # Acrylic acid
+    "NVP":     "C=CN1CCCC1=O",           # N-Vinylpyrrolidone
+}
+
+# ── Interferent Library ──────────────────────────────────────────────
+INTERFERENT_LIBRARY = {
+    "Tyrosine": "NC(Cc1ccc(O)cc1)C(=O)O",
+    "Leucine":  "CC(C)CC(N)C(=O)O",
+    "Dopamine": "NCCc1ccc(O)c(O)c1",
+}
+
+# ── Solvents (name → dielectric constant ε) ─────────────────────────
+# Values from PySCF ddCOSMO / standard references  [Lipparini2013]
+SOLVENTS = {
+    "Chloroform":   4.71,
+    "Acetonitrile": 35.69,
+    "MeOH":         32.61,
+}
+
+# ── Pipeline Parameters ─────────────────────────────────────────────
+STAGE1_TOP_N = 20      # Number of monomers passed from xTB screening
+STAGE3_TOP_N = 3       # Number of monomers sent to MD verification
+N_WORKERS    = 16      # CPU parallel processes
+N_GPU_WORKERS = 2      # GPU parallel processes (limited by VRAM)
+USE_GPU      = True    # Use GPU acceleration when available
+OUTPUT_DIR   = "/home/chan/Research/MIP simulation/results"
+
+# ── Results Subdirectories ─────────────────────────────────────────
+OUTPUT_DIRS = {
+    "stage1":     f"{OUTPUT_DIR}/stage1",
+    "stage2":     f"{OUTPUT_DIR}/stage2",
+    "stage3":     f"{OUTPUT_DIR}/stage3",
+    "stage4":     f"{OUTPUT_DIR}/stage4",
+    "features":   f"{OUTPUT_DIR}/features",
+    "validation": f"{OUTPUT_DIR}/validation",
+    "reports":    f"{OUTPUT_DIR}/reports",
+}
+
+
+def get_output_path(stage_key: str) -> "Path":
+    """Return Path for a stage output directory, creating it if needed."""
+    from pathlib import Path
+    p = Path(OUTPUT_DIRS[stage_key])
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+# ── Physical Constants ───────────────────────────────────────────────
+HARTREE_TO_KCAL = 627.509  # 1 Hartree in kcal/mol
+KB_KCAL = 0.001987204      # Boltzmann constant in kcal/(mol·K)
+TEMPERATURE = 298.15        # K
+
+# ── 추가 기능 설정 ──────────────────────────────────────────────────
+
+# Feature 1: QuantumDock 분자 도킹 (Mukasa et al. 2023)
+# 분자 표면 전체에서 orientation 생성 + GFN2-xTB SP 스크리닝
+N_DOCK_ORIENTATIONS = 200    # monomer당 기본 docking 방향 수 (적응형으로 자동 스케일)
+N_TOP_FOR_OPTIMIZATION = 10  # SP 스크리닝 후 full optimization 대상 수
+DOCK_SURFACE_OFFSET = 2.5    # vdW 표면에서 monomer 중심까지 거리 (Angstrom)
+COMPLEX_SEARCH_MODE = "quantumdock"  # 내부 참조용
+
+# DFT Method (Bursch/Grimme 2022 best-practice)
+# ωB97M-V: VV10 nonlocal 분산력 → 비공유결합 정확도 최고
+# def2 계열: Pople(6-311+G*) 대비 보론 등 전 원소에서 균형 잡힌 기저
+DFT_FUNCTIONAL = "wb97m-v"      # ωB97M-V (VV10 nonlocal dispersion)
+DFT_OPT_BASIS  = "def2-svp"    # geometry optimization용 (빠름)
+DFT_SP_BASIS   = "def2-tzvp"   # single-point energy용 (정확)
+
+# DFT partial relaxation for large molecules
+DFT_RELAX_HEAVY_THRESHOLD = 25  # 이 이상의 heavy atom 수에서 DFT relaxation 수행
+DFT_RELAX_STEPS = 5              # partial optimization 스텝 수
+
+# Feature 2: 용매 선택 전략
+SOLVENT_STRATEGY = "synthesis_match"
+# "synthesis_match" — SYNTHESIS_SOLVENT 용매의 결합에너지 사용 (Mukasa 2023)
+# "minimum"         — 가장 음수인 결합에너지 (최대 결합력 기준)
+# "average"         — 전 용매 평균
+# "worst"           — 가장 약한 결합에너지 (보수적 평가)
+SYNTHESIS_SOLVENT = "Chloroform"
+
+# Feature 3: Template:Monomer 비율 스크리닝
+MD_RATIO_SCREENING = True       # True면 비율별 스크리닝
+MD_RATIOS_TO_TEST = [1, 2, 4]   # 테스트할 비율 목록
+MD_TEMPLATE_MONOMER_RATIO = 4   # 고정 비율 (MD_RATIO_SCREENING=False 시)
+
+# Feature 4: ESP 맵 시각화
+USE_ESP_MAP = True  # True면 Stage 2에서 ESP 맵 생성
+
+# Feature 5: Cross-linker 스크리닝
+CROSSLINKER_LIBRARY = {
+    "EGDMA": "C=C(C)C(=O)OCCOC(=O)C(=C)C",
+    "DVB":   "C=Cc1ccccc1C=C",
+    "TRIM":  "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+    "BAM":   "C=CC(=O)NCCNC(=O)C=C",
+}
+CROSSLINKER_SCREENING = True
+CROSSLINKER_THRESHOLD = -1.0  # kcal/mol — 이보다 강하면 부적합 경고
