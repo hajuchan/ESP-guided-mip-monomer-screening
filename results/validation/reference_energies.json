@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "compute_date": "2026-03-24T15:46:11.998305",
+    "compute_date": "2026-03-24T18:17:55.509605",
     "dft_level": "wB97M-V/def2-TZVP",
     "bsse_corrected": true,
     "search_mode": "quantumdock"
@@ -14,6 +14,16 @@
       "search_info": {
         "n_orientations": 240,
         "xtb_best_sp": -6.499
+      }
+    },
+    "heptachlor_4VP": {
+      "bsse_dE": -12.956,
+      "raw_dE": -17.645,
+      "solvent": "Chloroform",
+      "best_direction": "site_12",
+      "search_info": {
+        "n_orientations": 233,
+        "xtb_best_sp": -5.079
       }
     }
   },
