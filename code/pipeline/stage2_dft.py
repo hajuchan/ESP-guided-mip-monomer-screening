@@ -178,6 +178,65 @@ def get_best_direction(template_smiles: str, monomer_smiles: str) -> str:
     return result.get("best_direction", "+x")
 
 
+# ── Covalent bond detection ────────────────────────────────────────
+
+# Typical covalent bond distance thresholds (Angstrom)
+# If inter-fragment atom distance falls below these, a covalent bond likely formed
+_COVALENT_THRESHOLDS = {
+    ("B", "O"): 1.55,  ("B", "N"): 1.65,  # boronate ester / B-N dative
+    ("C", "O"): 1.55,  ("C", "N"): 1.55,  # amide, ester
+    ("C", "C"): 1.60,  ("C", "S"): 1.90,
+    ("N", "H"): 1.15,  ("O", "H"): 1.10,
+    ("Si", "O"): 1.75, ("P", "O"): 1.70,  # silane, phosphate
+}
+_DEFAULT_COVALENT = 1.60  # Å
+
+
+def _check_covalent_bonds(complex_atom_str: str, n_template: int,
+                          monomer_name: str) -> str:
+    """Detect if covalent bonds formed between template and monomer fragments
+    during DFT geometry optimization.
+
+    Returns warning string if covalent bonds detected, empty string otherwise.
+    Covalent bonds are not errors — they indicate covalent-MIP candidates
+    (e.g., boronate ester MIP) that should be classified separately from
+    non-covalent MIP monomers.
+    """
+    import numpy as np
+
+    parts = [p.strip() for p in complex_atom_str.split(";") if p.strip()]
+    if len(parts) < n_template + 1:
+        return ""
+
+    # Parse coordinates
+    template_atoms, monomer_atoms = [], []
+    for i, part in enumerate(parts):
+        tokens = part.split()
+        sym = tokens[0].replace("ghost-", "")
+        pos = np.array([float(tokens[1]), float(tokens[2]), float(tokens[3])])
+        if i < n_template:
+            template_atoms.append((sym, pos))
+        else:
+            monomer_atoms.append((sym, pos))
+
+    # Check inter-fragment distances
+    new_bonds = []
+    for t_sym, t_pos in template_atoms:
+        for m_sym, m_pos in monomer_atoms:
+            dist = np.linalg.norm(t_pos - m_pos)
+            pair = tuple(sorted([t_sym, m_sym]))
+            threshold = _COVALENT_THRESHOLDS.get(pair, _DEFAULT_COVALENT)
+            if dist < threshold:
+                new_bonds.append(f"{t_sym}-{m_sym} ({dist:.2f}Å < {threshold}Å)")
+
+    if new_bonds:
+        bonds_str = ", ".join(new_bonds[:3])  # max 3 shown
+        return (f"공유결합 형성 감지: {bonds_str}. "
+                f"{monomer_name}은(는) 공유결합 MIP 후보일 수 있음 "
+                f"(비공유결합 monomer와 직접 비교 주의)")
+    return ""
+
+
 # ── DFT Calculations ────────────────────────────────────────────────
 
 def _dft_optimize(atom_str: str, basis: str, eps: float,
@@ -363,8 +422,13 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
             complex_atom = _dft_optimize(complex_atom, basis, eps, tmpdir,
                                          functional=func)
 
-            # Extract fragment coordinates from DFT-optimized complex for BSSE
+            # Check for covalent bond formation after optimization
             n_template = template_mol.GetNumAtoms()
+            covalent_warning = _check_covalent_bonds(
+                complex_atom, n_template, monomer_name
+            )
+
+            # Extract fragment coordinates from DFT-optimized complex for BSSE
             opt_parts = [p.strip() for p in complex_atom.split(";") if p.strip()]
             template_cp_str = "; ".join(opt_parts[:n_template])
             monomer_cp_str = "; ".join(opt_parts[n_template:])
@@ -392,7 +456,7 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
 
             logger.info(f"  raw_dE={raw_de:+.3f}, bsse_dE={bsse_de:+.3f} kcal/mol")
 
-            return {
+            result = {
                 "monomer": monomer_name,
                 "solvent": solvent_name,
                 "functional": func,
@@ -401,6 +465,10 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
                 "bsse_correction_kcal": round(raw_de - bsse_de, 3),
                 "success": True,
             }
+            if covalent_warning:
+                result["covalent_warning"] = covalent_warning
+                logger.warning(f"  ⚠ {monomer_name}: {covalent_warning}")
+            return result
         except Exception as e:
             logger.warning(f"DFT failed for {monomer_name}/{solvent_name}: {e}")
             return {
