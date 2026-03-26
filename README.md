@@ -322,23 +322,46 @@ bsse_dE = (E1 - E4 - E5) × 627.509 kcal/mol  ← 기본 결합에너지
 
 ### 과학적 원리
 
-좋은 MIP monomer는 template과 강하게 결합할 뿐 아니라, 유사한 간섭 물질(interferent)과는 약하게 결합해야 한다. Mukasa et al. (2023)의 선택도 공식을 사용한다:
+좋은 MIP monomer는 template과 강하게 결합할 뿐 아니라, 유사한 간섭 물질(interferent)과는 **약하게** 결합해야 한다. Mukasa et al. (2023)의 선택도 공식을 사용한다.
+
+**핵심: 같은 monomer가 template vs interferent에 얼마나 다르게 결합하는가**
 
 ```
-ΔE = E_binding(template) - E_binding(interferent)
+ΔE = ΔE(monomer-template) − ΔE(monomer-interferent)
 S = exp(ΔE / kB·T)
 
 kB = 0.001987 kcal/(mol·K), T = 298.15 K
+```
 
-ΔE < 0 → template 결합이 더 강함 → 선택적 (S < 1)
-ΔE > 0 → interferent 결합이 더 강함 → 비선택적 (S > 1)
+구체적으로:
+```
+ΔE(monomer-template)     = monomer가 template에 결합하는 에너지 (Stage 2에서 계산)
+ΔE(monomer-interferent)  = 같은 monomer가 interferent에 결합하는 에너지 (Stage 3에서 추가 계산)
+```
+
+```
+ΔE < 0 → monomer가 template에 더 강하게 결합 → 선택적 (좋은 MIP)
+ΔE > 0 → monomer가 interferent에 더 강하게 결합 → 비선택적 (나쁜 MIP)
+```
+
+예시 (OPD monomer):
+```
+ΔE(OPD-Phe)       = -6 kcal/mol  (template에 강하게 결합)
+ΔE(OPD-Tyrosine)  = -2 kcal/mol  (interferent에 약하게 결합)
+ΔE = (-6) - (-2)  = -4 kcal/mol  → 선택적! (S < 1)
+
+ΔE(4VB-Phe)       = -46 kcal/mol (template에 강하게 결합)
+ΔE(4VB-Tyrosine)  = -40 kcal/mol (interferent에도 강하게 결합!)
+ΔE = (-46) - (-40) = -6 kcal/mol → 덜 선택적 (결합 강도 차이가 크지 않음)
 ```
 
 최종 점수 = 모든 interferent에 대한 log(S) 평균. 더 음수일수록 선택적.
 
+**주의: ΔE(interferent-template)이 아님.** "interferent가 template 자리에 들어올 때의 에너지"가 아니라, "**같은 monomer**가 interferent와 결합할 때의 에너지"를 비교하는 것이다. 이 차이가 핵심이다.
+
 ### 구현 기술
 
-Interferent-monomer 결합에너지도 Stage 2와 동일한 DFT 프로토콜(ωB97M-V/def2-TZVP + PCM + BSSE)로 계산한다. 결과는 캐시하여 재계산을 방지한다.
+**Stage 3는 (monomer × interferent) 조합의 DFT를 추가 계산한다.** Stage 2에서 계산한 monomer-template 결합에너지에 더해, 각 monomer와 각 interferent의 결합에너지를 동일한 DFT 프로토콜(적응형 범함수/def2-TZVP + PCM + BSSE)로 계산한다. 예를 들어 monomer 6개 × interferent 3개 = 18개 추가 DFT 계산이 필요하다. 결과는 `stage3_interferent_dft.json`에 캐시하여 재계산을 방지한다.
 
 시각화는 matplotlib으로 두 종류 출력:
 1. **Scatter plot**: x=결합에너지, y=선택도 (이상적 위치: 좌하단)
@@ -616,12 +639,36 @@ Heptachlor-MAA (실험 IF=1.92, 논문 계산값=-8.11 kcal/mol)를 기준 시�
 | v5 | ωB97M-V/def2-TZVP | PCM | GPU geomeTRIC | gas-phase ghost | bsse=-14.32 | DDT ρ=1.0이나 Heptachlor ρ=0.5 |
 | **v6** | **적응형 (ωB97XD / ωB97M-V) + def2-TZVP** | **PCM** | **GPU geomeTRIC** | **gas-phase ghost** | **ωB97XD bsse=-10.03** | **ρ=1.0 (양 시스템)** |
 
-**각 버전에서 얻은 교훈:**
-- **v1→v2**: xTB 구조에서 DFT BSSE를 하면 PES 불일치로 과보정 → DFT 구조 필요
-- **v2→v3**: DFT SP만으로는 xTB 구조의 한계를 극복 못함 → DFT geometry optimization 필요
-- **v3→v4**: ddCOSMO는 gpu4pyscf gradient 미지원 → PCM으로 전환하여 GPU opt 가능
-- **v4→v5**: PCM cavity에 ghost atom이 포함되면 비물리적 → BSSE는 gas-phase에서 수행
-- **v5→v6**: 단일 범함수로는 H-bond/분산력 시스템 모두 만족 불가 → 상호작용 유형별 자동 선택
+**각 버전에서 변경한 사항과 교훈:**
+
+**v1→v2** (변경: ddCOSMO→PCM, BSSE 제거)
+- xTB 구조에서 DFT ghost atom을 계산하면 PES 불일치로 BSSE가 과보정됨 (raw=-8.08이 bsse=-2.28으로 급감)
+- ddCOSMO는 gpu4pyscf의 analytical gradient를 지원하지 않아 GPU DFT optimization 불가능 → PCM으로 전환
+- BSSE를 일단 제거하여 과보정 문제를 우회
+
+**v2→v3** (변경: DFT SP only → GPU geomeTRIC geometry optimization 추가)
+- xTB 구조에서 DFT SP만 하면, xTB가 찾은 최적 구조가 DFT PES에서의 최적과 달라 부정확
+- PCM + GPU gradient가 작동하므로 geomeTRIC으로 DFT 레벨 구조 최적화 가능해짐
+- 그러나 DFT opt 후 BSSE 없이 raw_dE를 사용하면 여전히 과대평가 (-12.36)
+
+**v3→v4** (변경: BSSE 재활성화, PCM 포함 ghost atom 계산)
+- DFT 최적화 구조를 얻었으므로 이제 BSSE가 정상 작동할 것으로 기대
+- 그러나 PCM cavity 안에서 ghost atom을 계산하면 cavity 형태가 왜곡됨 → BSSE가 다시 과보정 (bsse=-0.95)
+
+**v4→v5** (변경: ωB97XD→ωB97M-V, 6-311+G*→def2-TZVP, BSSE를 gas-phase에서 수행, density fitting 추가, dual-basis 전략)
+- BSSE ghost atom 계산에서 PCM을 제외하여 cavity 왜곡 문제 해결
+- 범함수를 ωB97M-V로 변경: VV10 nonlocal 분산력이 D3BJ 경험적 보정보다 정확 (전자밀도 기반 vs 원자쌍 거리 기반)
+- 기저함수를 def2-TZVP로 변경: Pople 계열(6-311+G*)보다 보론(B), 염소(Cl) 등 전 원소에서 균형 잡힌 기술. 더 완전한 기저이므로 BSSE 자체도 감소 (basis set superposition이 작아짐)
+- 2단계 기저 분리 (dual-basis): 최적화는 def2-SVP(작음, 빠름), 에너지는 def2-TZVP(큼, 정확) → 속도 ~4배 향상
+- density fitting (RI-J) 추가: DFT SCF ~2-3배 추가 가속
+- 결과: DDT ρ=1.000 달성. 그러나 Heptachlor ρ=0.500으로 하락 — ωB97M-V가 Styrene의 분산력을 과대평가하여 2-3위 순위 역전
+
+**v5→v6** (변경: 단일 범함수 → 상호작용 유형별 적응형 범함수 자동 선택)
+- 단일 범함수로는 H-bond 지배(Heptachlor)와 분산력 지배(DDT) 시스템을 동시에 만족 불가
+- template+monomer의 H-bond donor/acceptor 수를 RDKit로 자동 계산하여 범함수 선택:
+  - H-bond D+A ≥ 2 → ωB97XD (H-bond에 최적화, Heptachlor ρ=1.000)
+  - H-bond D+A < 2 → ωB97M-V (분산력에 최적화, DDT ρ=1.000)
+- 두 시스템 모두 ρ=1.000 동시 달성
 
 ### 14.4 범함수별 검증 결과
 
@@ -696,6 +743,26 @@ Heptachlor-MAA (실험 IF=1.92, 논문 계산값=-8.11 kcal/mol)를 기준 시�
 | 분산력 지배 | H-bond D+A < 2 | ωB97M-V (VV10 nonlocal) | DDT ρ=1.000 |
 
 판별: RDKit `Lipinski.NumHDonors()` + `NumHAcceptors()`로 template+monomer의 H-bond D+A를 자동 계산.
+
+#### 적응형 범함수의 한계: 교차 비교 문제
+
+적응형 전략은 각 monomer-template pair에 대해 최적의 범함수를 선택하지만, **서로 다른 범함수로 계산된 결합에너지를 직접 비교할 수 없다**는 근본적 한계가 있다.
+
+```
+예: Heptachlor 시스템
+  MAA(ωB97XD):     bsse = -10.03 kcal/mol
+  Styrene(ωB97M-V): bsse = -13.58 kcal/mol
+  → Styrene이 더 강해 보이지만, ωB97M-V가 전체적으로 에너지를 더 크게 계산하므로
+    이 비교는 의미 없음
+```
+
+이 문제는 다음 경우에 발생한다:
+- 같은 template에 대해 일부 monomer는 ωB97XD, 일부는 ωB97M-V로 계산될 때
+- 예: DDT-MAA(ωB97XD) vs DDT-Styrene(ωB97M-V)
+
+**같은 범함수로 계산된 monomer 간에는 순위 비교가 정확하다.** 실제 MIP 응용에서 대부분의 monomer(MAA, 4VP, OPD, ACM 등)는 H-bond D+A ≥ 2로 **동일하게 ωB97XD가 선택**되므로 교차 비교 문제가 발생하는 경우는 드물다. Styrene처럼 H-bond 작용기가 없는 monomer가 포함될 때만 주의가 필요하며, 이 경우 파이프라인은 결과에 사용된 범함수를 함께 표시하여 사용자가 판단할 수 있도록 한다.
+
+Consensus ranking(두 범함수의 순위 합산)도 검토했으나, 정확한 범함수의 순위를 부정확한 범함수가 희석시키는 문제가 있어 적응형 단일 선택이 더 우수했다.
 
 #### 최종 예측 순위 vs 실험 IF
 
@@ -778,10 +845,10 @@ IF = (template 특이적 결합) / (비특이적 결합)
 
 | 기준 | 수식 | 의미 |
 |------|------|------|
-| ✗ 결합에너지 절대값 | ΔE(template-monomer) | 강한 결합 monomer 선택 (보론산 1위) |
-| **✓ 선택도** | **ΔΔE = ΔE(template) − ΔE(interferent)** | **선택적 결합 monomer 선택 (OPD 1위)** |
+| ✗ Stage 2 결합에너지 | ΔE(monomer-template) | 결합이 강한 monomer 선택 (보론산 1위) |
+| **✓ Stage 3 선택도** | **ΔΔE = ΔE(monomer-template) − ΔE(monomer-interferent)** | **template에만 선택적인 monomer 선택 (OPD 1위)** |
 
-본 파이프라인의 **Stage 3(선택도 계산)**이 이 역할을 수행한다. Stage 2의 결합에너지만으로 최종 판단하지 않고, Stage 3에서 interferent와의 차이(ΔΔE)를 계산하여 **실험 IF와 일치하는 순위**를 도출한다.
+본 파이프라인의 **Stage 3(선택도 계산)**이 이 역할을 수행한다. Stage 2는 monomer-template **결합에너지**만으로 순위를 매기므로 보론산이 과대평가된다. Stage 3에서 **같은 monomer가 interferent에 얼마나 결합하는지** 추가 계산하여, 그 차이(ΔΔE)로 **선택도 순위**를 도출한다. 이것이 4단계 파이프라인에서 Stage 2만으로 최종 판단하지 않고 Stage 3를 반드시 거쳐야 하는 이유이다.
 
 ### 14.9 에너지 유형 정의
 

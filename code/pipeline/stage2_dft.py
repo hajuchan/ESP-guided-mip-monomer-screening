@@ -392,12 +392,14 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
                         template_smiles: str, solvent_name: str,
                         eps: float, direction: str = "+x",
                         esp_output_dir: str = None,
-                        prebuilt_complex_mol: "Chem.Mol" = None) -> dict:
+                        prebuilt_complex_mol: "Chem.Mol" = None,
+                        functional_override: str = None) -> dict:
     """Compute DFT binding energy with BSSE for one (monomer, solvent) pair.
 
     If prebuilt_complex_mol is provided, use it instead of building from direction.
     Automatically selects ωB97XD (H-bond) or ωB97M-V (dispersion) based on
     H-bond donor/acceptor count of the template-monomer pair.
+    If functional_override is provided, use that functional instead of auto-select.
     """
     basis = DFT_SP_BASIS
 
@@ -412,7 +414,10 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
                                                 direction=direction)
 
             # Auto-select functional based on interaction type
-            func = select_functional(template_smiles, monomer_smiles)
+            if functional_override:
+                func = functional_override
+            else:
+                func = select_functional(template_smiles, monomer_smiles)
 
             template_atom = mol_to_pyscf_atom(template_mol)
             monomer_atom = mol_to_pyscf_atom(monomer_mol)
