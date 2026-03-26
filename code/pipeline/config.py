@@ -81,10 +81,15 @@ N_TOP_FOR_OPTIMIZATION = 10  # SP 스크리닝 후 full optimization 대상 수
 DOCK_SURFACE_OFFSET = 2.5    # vdW 표면에서 monomer 중심까지 거리 (Angstrom)
 COMPLEX_SEARCH_MODE = "quantumdock"  # 내부 참조용
 
-# DFT Method (Bursch/Grimme 2022 best-practice)
-# ωB97M-V: VV10 nonlocal 분산력 → 비공유결합 정확도 최고
-# def2 계열: Pople(6-311+G*) 대비 보론 등 전 원소에서 균형 잡힌 기저
-DFT_FUNCTIONAL = "wb97m-v"      # ωB97M-V (VV10 nonlocal dispersion)
+# DFT Method — 상호작용 유형에 따라 자동 선택
+# H-bond 지배 → ωB97XD (D2 경험적 분산): H-bond 기술 우수 (Heptachlor ρ=1.000)
+# 분산력 지배 → ωB97M-V (VV10 nonlocal 분산): 분산력 기술 우수 (DDT ρ=1.000)
+# 판별 기준: template+monomer의 H-bond donor/acceptor 수
+DFT_FUNCTIONAL_HBOND = "wb97xd"     # H-bond 지배 시스템용
+DFT_FUNCTIONAL_DISP  = "wb97m-v"    # 분산력 지배 시스템용
+DFT_FUNCTIONAL       = "wb97xd"     # 기본값 (fallback)
+# H-bond donor/acceptor가 이 수 이상이면 H-bond 지배로 판별
+HBOND_DOMINANCE_THRESHOLD = 2
 DFT_OPT_BASIS  = "def2-svp"    # geometry optimization용 (빠름)
 DFT_SP_BASIS   = "def2-tzvp"   # single-point energy용 (정확)
 

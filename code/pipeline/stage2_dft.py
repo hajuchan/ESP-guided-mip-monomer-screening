@@ -37,10 +37,41 @@ from .config import (
     DFT_OPT_BASIS,
     DFT_SP_BASIS,
     DFT_FUNCTIONAL,
+    DFT_FUNCTIONAL_HBOND,
+    DFT_FUNCTIONAL_DISP,
+    HBOND_DOMINANCE_THRESHOLD,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [Stage2] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def select_functional(template_smiles: str, monomer_smiles: str) -> str:
+    """상호작용 유형에 따라 범함수를 자동 선택.
+
+    H-bond donor/acceptor가 충분하면 ωB97XD (H-bond 정확),
+    부족하면 ωB97M-V (분산력 정확).
+    """
+    from rdkit.Chem import Descriptors, Lipinski
+    t_mol = Chem.MolFromSmiles(template_smiles)
+    m_mol = Chem.MolFromSmiles(monomer_smiles)
+    if t_mol is None or m_mol is None:
+        return DFT_FUNCTIONAL
+
+    # H-bond donor + acceptor 합산 (template + monomer)
+    n_hbd = Lipinski.NumHDonors(t_mol) + Lipinski.NumHDonors(m_mol)
+    n_hba = Lipinski.NumHAcceptors(t_mol) + Lipinski.NumHAcceptors(m_mol)
+    n_hb_total = n_hbd + n_hba
+
+    if n_hb_total >= HBOND_DOMINANCE_THRESHOLD:
+        func = DFT_FUNCTIONAL_HBOND  # ωB97XD
+        reason = f"H-bond 지배 (HBD={n_hbd}+HBA={n_hba}={n_hb_total})"
+    else:
+        func = DFT_FUNCTIONAL_DISP   # ωB97M-V
+        reason = f"분산력 지배 (HBD={n_hbd}+HBA={n_hba}={n_hb_total})"
+
+    logger.info(f"    범함수 선택: {func} — {reason}")
+    return func
 
 
 # ── Utility: SMILES → 3D mol ────────────────────────────────────────
@@ -150,10 +181,10 @@ def get_best_direction(template_smiles: str, monomer_smiles: str) -> str:
 # ── DFT Calculations ────────────────────────────────────────────────
 
 def _dft_optimize(atom_str: str, basis: str, eps: float,
-                  tmpdir: str) -> str:
+                  tmpdir: str, functional: str = None) -> str:
     """GPU-accelerated DFT geometry optimization with PCM solvation.
 
-    Uses ωB97XD/6-311+G* + PCM on GPU via gpu4pyscf + geomeTRIC.
+    Uses selected functional + PCM on GPU via gpu4pyscf + geomeTRIC.
     PCM (not ddCOSMO) is used because gpu4pyscf supports PCM analytical
     gradient on GPU, enabling full geometry optimization with solvation.
 
@@ -168,12 +199,13 @@ def _dft_optimize(atom_str: str, basis: str, eps: float,
         logger.warning("  geomeTRIC not available, using SP only")
         return atom_str
 
+    func = functional or DFT_FUNCTIONAL
     lib.param.TMPDIR = tmpdir
 
     # 2-level optimization: small basis + RI-J for speed, then large basis for SP
     mol = gto.M(atom=atom_str, basis=DFT_OPT_BASIS, verbose=0)
     mf = dft.RKS(mol).density_fit()  # RI-J density fitting (~3x faster)
-    mf.xc = DFT_FUNCTIONAL
+    mf.xc = func
     mf = PCM(mf)
     mf.with_solvent.eps = eps
 
@@ -226,16 +258,18 @@ def _apply_d3bj(mf, mol_pyscf):
 
 
 def dft_energy(atom_str: str, basis: str, eps: float,
-               tmpdir: str, use_gpu: bool = True) -> float:
-    """Run B3LYP-D3BJ/basis with ddCOSMO solvation. Returns energy in Hartree."""
+               tmpdir: str, use_gpu: bool = True,
+               functional: str = None) -> float:
+    """Run DFT/basis with PCM solvation. Returns energy in Hartree."""
     os.environ["PYSCF_TMPDIR"] = tmpdir
 
     from pyscf import gto, dft, solvent, lib
     lib.param.TMPDIR = tmpdir
+    func = functional or DFT_FUNCTIONAL
 
     mol = gto.M(atom=atom_str, basis=basis, verbose=0)
     mf = dft.RKS(mol).density_fit()  # RI-J density fitting
-    mf.xc = DFT_FUNCTIONAL
+    mf.xc = func
 
     from pyscf.solvent import PCM
     mf = PCM(mf)
@@ -251,7 +285,8 @@ def dft_energy(atom_str: str, basis: str, eps: float,
 
 def dft_energy_ghost(real_atom_str: str, ghost_atom_str: str,
                      basis: str, eps: float, tmpdir: str,
-                     use_gpu: bool = True) -> float:
+                     use_gpu: bool = True,
+                     functional: str = None) -> float:
     """DFT energy with ghost atoms for BSSE counterpoise correction.
 
     Boys & Bernardi, Mol. Phys. 1970.
@@ -262,13 +297,14 @@ def dft_energy_ghost(real_atom_str: str, ghost_atom_str: str,
 
     from pyscf import gto, dft, solvent, lib
     lib.param.TMPDIR = tmpdir
+    func = functional or DFT_FUNCTIONAL
 
     # Combine real atoms + ghost atoms (ghost provides basis functions only)
     combined_atom = real_atom_str + "; " + _make_ghost_string(ghost_atom_str)
     mol = gto.M(atom=combined_atom, basis=basis, verbose=0)
 
     mf = dft.RKS(mol).density_fit()  # RI-J
-    mf.xc = DFT_FUNCTIONAL
+    mf.xc = func
     # No PCM for ghost atoms — ghost distorts PCM cavity
     if use_gpu:
         mf = _try_gpu(mf)
@@ -301,6 +337,8 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
     """Compute DFT binding energy with BSSE for one (monomer, solvent) pair.
 
     If prebuilt_complex_mol is provided, use it instead of building from direction.
+    Automatically selects ωB97XD (H-bond) or ωB97M-V (dispersion) based on
+    H-bond donor/acceptor count of the template-monomer pair.
     """
     basis = DFT_SP_BASIS
 
@@ -314,15 +352,16 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
                 complex_mol = build_complex_mol(template_mol, monomer_mol,
                                                 direction=direction)
 
-            # DFT binding energy: ωB97XD/6-311+G* + PCM, GPU-accelerated
-            # 1) GPU geometry optimization on complex
-            # 2) BSSE counterpoise correction (valid: DFT structure + DFT BSSE)
+            # Auto-select functional based on interaction type
+            func = select_functional(template_smiles, monomer_smiles)
+
             template_atom = mol_to_pyscf_atom(template_mol)
             monomer_atom = mol_to_pyscf_atom(monomer_mol)
             complex_atom = mol_to_pyscf_atom(complex_mol)
 
-            logger.info(f"  GPU DFT optimization (wB97M-V+PCM)...")
-            complex_atom = _dft_optimize(complex_atom, basis, eps, tmpdir)
+            logger.info(f"  GPU DFT optimization ({func}+PCM)...")
+            complex_atom = _dft_optimize(complex_atom, basis, eps, tmpdir,
+                                         functional=func)
 
             # Extract fragment coordinates from DFT-optimized complex for BSSE
             n_template = template_mol.GetNumAtoms()
@@ -331,18 +370,23 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
             monomer_cp_str = "; ".join(opt_parts[n_template:])
 
             # Raw binding energy (no BSSE)
-            e_complex = dft_energy(complex_atom, basis, eps, tmpdir)
-            e_template = dft_energy(template_atom, basis, eps, tmpdir)
-            e_monomer = dft_energy(monomer_atom, basis, eps, tmpdir)
+            e_complex = dft_energy(complex_atom, basis, eps, tmpdir,
+                                   functional=func)
+            e_template = dft_energy(template_atom, basis, eps, tmpdir,
+                                    functional=func)
+            e_monomer = dft_energy(monomer_atom, basis, eps, tmpdir,
+                                   functional=func)
             raw_de = (e_complex - e_template - e_monomer) * HARTREE_TO_KCAL
 
             # BSSE counterpoise (DFT structure → DFT BSSE = consistent)
             logger.info(f"  BSSE counterpoise correction...")
             e_template_cp = dft_energy_ghost(
-                template_cp_str, monomer_cp_str, basis, eps, tmpdir
+                template_cp_str, monomer_cp_str, basis, eps, tmpdir,
+                functional=func
             )
             e_monomer_cp = dft_energy_ghost(
-                monomer_cp_str, template_cp_str, basis, eps, tmpdir
+                monomer_cp_str, template_cp_str, basis, eps, tmpdir,
+                functional=func
             )
             bsse_de = (e_complex - e_template_cp - e_monomer_cp) * HARTREE_TO_KCAL
 
@@ -351,6 +395,7 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
             return {
                 "monomer": monomer_name,
                 "solvent": solvent_name,
+                "functional": func,
                 "raw_dE_kcal": round(raw_de, 3),
                 "bsse_dE_kcal": round(bsse_de, 3),
                 "bsse_correction_kcal": round(raw_de - bsse_de, 3),
