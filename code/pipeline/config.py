@@ -26,9 +26,11 @@ MONOMER_LIBRARY = {
 
 # ── Interferent Library ──────────────────────────────────────────────
 INTERFERENT_LIBRARY = {
-    "Tyrosine": "NC(Cc1ccc(O)cc1)C(=O)O",
-    "Leucine":  "CC(C)CC(N)C(=O)O",
-    "Dopamine": "NCCc1ccc(O)c(O)c1",
+    "Tyrosine":    "NC(Cc1ccc(O)cc1)C(=O)O",
+    "Valine":      "CC(C)[C@@H](N)C(=O)O",
+    "Leucine":     "CC(C)CC(N)C(=O)O",
+    "Isoleucine":  "CC[C@H](C)[C@@H](N)C(=O)O",
+    "Dopamine":    "NCCc1ccc(O)c(O)c1",
 }
 
 # ── Solvents (name → dielectric constant ε) ─────────────────────────
@@ -45,7 +47,8 @@ STAGE3_TOP_N = 3       # Number of monomers sent to MD verification
 N_WORKERS    = 16      # CPU parallel processes
 N_GPU_WORKERS = 2      # GPU parallel processes (limited by VRAM)
 USE_GPU      = True    # Use GPU acceleration when available
-OUTPUT_DIR   = "/home/chan/Research/MIP simulation/results"
+from pathlib import Path as _Path
+OUTPUT_DIR   = str(_Path(__file__).resolve().parent.parent.parent / "results")
 
 # ── Results Subdirectories ─────────────────────────────────────────
 OUTPUT_DIRS = {

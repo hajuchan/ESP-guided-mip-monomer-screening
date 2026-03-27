@@ -38,26 +38,6 @@ SINGH_2012_IF = {
 MUKASA_2023_EXPECTED_TOP3    = ["OPD", "MAA", "4VB"]
 MUKASA_2023_EXPECTED_BOTTOM2 = ["PYR", "ANI"]
 
-# ── Pardeshi & Singh 2012 (Gallic Acid) 기준값 ─────────────────────
-# DOI: 10.1007/s00894-012-1481-5
-# DFT: B3LYP/6-31G(d), 18 monomers screened, 4 validated experimentally
-# Template: Gallic acid
-GALLIC_ACID_SMILES = "OC(=O)c1cc(O)c(O)c(O)c1"
-GALLIC_ACID_MONOMERS = {
-    "AA":  "C=CC(=O)O",       # Acrylic acid
-    "AAm": "C=CC(N)=O",       # Acrylamide (= ACM in our library)
-    "4VP": "C(=C)c1ccncc1",   # 4-Vinylpyridine
-    "MMA": "COC(=O)C(=C)C",   # Methyl methacrylate
-}
-GALLIC_ACID_IF = {
-    "AA":  5.28,
-    "AAm": 4.80,
-    "4VP": 2.59,
-    "MMA": 1.95,
-}
-GALLIC_ACID_SOLVENT = "Chloroform"
-GALLIC_ACID_EPS = 4.71
-
 # ── 허용 오차 ────────────────────────────────────────────────────────
 TOLERANCE_KCAL     = 0.5   # 수치 재현 허용 오차 (kcal/mol)
 SPEARMAN_THRESHOLD = 0.8   # heptachlor 합격 기준

@@ -624,7 +624,6 @@ residual_std = LOO-CV 잔차의 표준편차
 | 1 | Singh 2012 | Heptachlor | MAA, 4VP, Styrene | MAA(1.92) > 4VP(1.45) > Sty(0.99) | Spearman ρ ≥ 0.8 |
 | 2 | Singh 2012 | DDT | MAA, 4VP, Styrene | 4VP(1.65) > MAA(1.43) > Sty(1.21) | Spearman ρ ≥ 0.5 |
 | 3 | Mukasa 2023 | Phenylalanine | OPD, MAA, 4VB, APB, ACM, PYR | OPD(~3.2) > ... > PYR(~1.2) | OPD > PYR 방향성 |
-| 4 | Pardeshi 2012 | Gallic acid | AA, AAm, 4VP, MMA | AA(5.28) > AAm(4.80) > 4VP(2.59) > MMA(1.95) | Spearman ρ ≥ 0.8 |
 
 ### 14.3 DFT 설정 반복 개선 과정
 
@@ -917,8 +916,7 @@ IF = (template 특이적 결합) / (비특이적 결합)
 | 9 | Wu et al. | arXiv 2024 | 10.48550/arXiv.2404.09452 | GPU4PySCF GPU 가속 |
 | 10 | Bursch, Grimme et al. | Angew. Chem. Int. Ed. 2022 | 10.1002/anie.202205735 | Best-Practice DFT: def2 기저 권장, Pople 기저 비권장 |
 | 11 | Mardirossian & Head-Gordon | J. Chem. Phys. 2016 | 10.1063/1.4952647 | ωB97M-V 범함수 (VV10 nonlocal 분산력) |
-| 12 | Pardeshi & Singh | J. Mol. Model. 2012 | 10.1007/s00894-012-1481-5 | Gallic Acid MIP 검증 데이터 (IF: AA 5.28, AAm 4.80, 4VP 2.59, MMA 1.95) |
-| 13 | Weigend & Ahlrichs | Phys. Chem. Chem. Phys. 2005 | 10.1039/b508541a | def2 기저함수 세트 (def2-SVP, def2-TZVP) |
+| 12 | Weigend & Ahlrichs | Phys. Chem. Chem. Phys. 2005 | 10.1039/b508541a | def2 기저함수 세트 (def2-SVP, def2-TZVP) |
 
 ---
 
@@ -967,7 +965,7 @@ python run_pipeline.py --suggest-interferents   # Interferent 자동 제안
 python run_pipeline.py --predict-if            # IF 예측 모델
 python run_pipeline.py --report                # HTML 리포트 생성
 
-# 검증 (19 pair: Singh 6 + Mukasa 9 + Gallic Acid 4)
+# 검증 (15 pair: Singh 6 + Mukasa 9)
 python run_validation.py --compute --stage all    # DFT 계산 + 전체 검증
 python run_validation.py --load-only --stage all  # 기존 결과로 검증만
 ```

@@ -90,11 +90,15 @@ def _compute_monomer_interferent(monomer_name, monomer_smiles,
         return {"label": label, "bsse_dE": None, "error": str(exc)}
 
 
-def compute_selectivity_data(output_dir=OUTPUT_DIR):
+def compute_selectivity_data(output_dir=OUTPUT_DIR, interferent_filter=None):
     """Compute all monomer-interferent binding energies for Stage 3 selectivity.
 
     Computes for both ωB97XD and ωB97M-V functionals.
     Results saved to results/validation/selectivity_data.json
+
+    Args:
+        interferent_filter: list of interferent names to compute (e.g. ["Valine", "Isoleucine"]).
+                           None = compute all interferents.
     """
     out_path = Path(output_dir) / "validation"
     out_path.mkdir(parents=True, exist_ok=True)
@@ -115,11 +119,12 @@ def compute_selectivity_data(output_dir=OUTPUT_DIR):
         "PYR": MONOMER_LIBRARY["PYR"],
     }
 
-    interferents = {
-        "Tyrosine": INTERFERENT_LIBRARY["Tyrosine"],
-        "Leucine": INTERFERENT_LIBRARY["Leucine"],
-        "Dopamine": INTERFERENT_LIBRARY["Dopamine"],
-    }
+    if interferent_filter:
+        interferents = {k: INTERFERENT_LIBRARY[k] for k in interferent_filter
+                        if k in INTERFERENT_LIBRARY}
+        logger.info(f"Filtered interferents: {list(interferents.keys())}")
+    else:
+        interferents = {k: v for k, v in INTERFERENT_LIBRARY.items()}
 
     functionals = ["wb97xd", "wb97m-v"]
     solvent_name = "MeOH"
@@ -188,7 +193,7 @@ def compute_rankings(output_dir=OUTPUT_DIR):
     kbt = KB_KCAL * TEMPERATURE
 
     monomers = ["OPD", "MAA", "4VB", "APB", "ACM", "PYR"]
-    interferents = ["Tyrosine", "Leucine", "Dopamine"]
+    interferents = list(INTERFERENT_LIBRARY.keys())
     exp_if = {"OPD": 3.2, "MAA": 2.8, "4VB": 2.4, "APB": 2.0, "ACM": 1.5, "PYR": 1.2}
 
     results = {}

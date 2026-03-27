@@ -1,0 +1,50 @@
+name: MIPscreen
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ── Core ──
+  - python=3.11
+  - pip
+
+  # ── Cheminformatics ──
+  - rdkit>=2025.03         # 분자 구조 생성, fingerprint, 시각화
+  - tblite-python>=0.5.0   # GFN2-xTB semi-empirical (Stage 1 스크리닝)
+
+  # ── Molecular Dynamics ──
+  - openmm>=8.2            # MD 시뮬레이션 (Stage 4)
+  - openmmforcefields      # GAFF2/OpenFF 힘장
+  - openff-toolkit         # OpenFF Sage 2.1.0
+  - mdtraj                 # 궤적 분석 (RDF, H-bond)
+  - ambertools             # GAFF2 파라미터
+
+  # ── Numerical / Visualization ──
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+
+  # ── pip 전용 패키지 (conda에 없거나 pip이 더 안정적) ──
+  - pip:
+    - pyscf>=2.7.0             # DFT 계산 (Stage 2)
+    - pyscf-dispersion         # D3BJ/D4 분산력 보정
+    - gpu4pyscf-cuda12x>=1.4   # GPU 가속 DFT (CUDA 12.x)
+    - gpu4pyscf-libxc-cuda12x  # GPU용 XC 범함수 라이브러리
+    - geometric               # geomeTRIC geometry optimizer
+    - vina                    # AutoDock Vina 도킹 (Stage 1)
+    - meeko                   # Vina용 PDBQT 변환
+
+# ── 설치 방법 ──
+# conda env create -f environment.yml
+# conda activate MIPscreen
+#
+# ── GPU 관련 참고 ──
+# CUDA 12.x 드라이버가 필요합니다 (nvidia-smi로 확인).
+# CUDA가 없으면 gpu4pyscf가 자동으로 CPU fallback합니다.
+# gpu4pyscf-cuda12x 대신 CUDA 11.x 환경이면:
+#   pip install gpu4pyscf-cuda11x gpu4pyscf-libxc-cuda11x
+#
+# ── tblite 참고 ──
+# tblite는 반드시 conda-forge에서 설치해야 합니다 (C 라이브러리 포함).
+# pip install tblite-python은 C extension이 빠져 작동하지 않습니다.

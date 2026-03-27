@@ -19,7 +19,6 @@ from pipeline.config import (
 )
 from .config_validation import (
     SINGH_2012_BINDING_ENERGIES, VALIDATION_SMILES,
-    GALLIC_ACID_SMILES, GALLIC_ACID_MONOMERS, GALLIC_ACID_SOLVENT, GALLIC_ACID_EPS,
 )
 from pipeline.stage2_dft import compute_dft_binding
 from pipeline.stage1_xtb import (
@@ -138,7 +137,6 @@ def _build_singh2012_tasks() -> list:
 
 def _build_mukasa2023_tasks() -> list:
     monomer_names = ["OPD", "MAA", "4VB", "APB", "ACM", "PYR"]
-    interferent_names = ["Tyrosine", "Leucine", "Dopamine"]
     tasks = []
     for mon in monomer_names:
         tasks.append({
@@ -150,35 +148,8 @@ def _build_mukasa2023_tasks() -> list:
             "solvent_name": "MeOH",
             "eps": SOLVENTS["MeOH"],
         })
-    for interf in interferent_names:
-        tasks.append({
-            "label": f"phe_{interf.lower()}",
-            "group": "mukasa2023",
-            "template_smiles": TEMPLATE_SMILES,
-            "monomer_name": interf,
-            "monomer_smiles": INTERFERENT_LIBRARY[interf],
-            "solvent_name": "MeOH",
-            "eps": SOLVENTS["MeOH"],
-        })
     return tasks
 
-
-def _build_gallic_acid_tasks() -> list:
-    """Gallic Acid validation set (Pardeshi & Singh 2012).
-    4 monomers with experimental IF: AA(5.28) > AAm(4.80) > 4VP(2.59) > MMA(1.95)
-    """
-    tasks = []
-    for mon_key, mon_smiles in GALLIC_ACID_MONOMERS.items():
-        tasks.append({
-            "label": f"gallic_{mon_key}",
-            "group": "gallic_acid",
-            "template_smiles": GALLIC_ACID_SMILES,
-            "monomer_name": mon_key,
-            "monomer_smiles": mon_smiles,
-            "solvent_name": GALLIC_ACID_SOLVENT,
-            "eps": GALLIC_ACID_EPS,
-        })
-    return tasks
 
 
 def compute_all_references(output_dir: str = OUTPUT_DIR) -> dict:
@@ -191,18 +162,14 @@ def compute_all_references(output_dir: str = OUTPUT_DIR) -> dict:
     ref_file = out_path / "validation" / "reference_energies.json"
 
     # Load existing results to skip completed pairs
-    existing = {"metadata": {}, "singh2012": {}, "mukasa2023": {}, "gallic_acid": {}}
+    existing = {"metadata": {}, "singh2012": {}, "mukasa2023": {}}
     if ref_file.exists():
         with open(ref_file) as f:
             existing = json.load(f)
-        # Ensure gallic_acid key exists for older result files
-        if "gallic_acid" not in existing:
-            existing["gallic_acid"] = {}
         logger.info(f"Loaded {len(existing.get('singh2012',{}))} singh + "
-                    f"{len(existing.get('mukasa2023',{}))} mukasa + "
-                    f"{len(existing.get('gallic_acid',{}))} gallic existing results")
+                    f"{len(existing.get('mukasa2023',{}))} mukasa existing results")
 
-    all_tasks = _build_singh2012_tasks() + _build_mukasa2023_tasks() + _build_gallic_acid_tasks()
+    all_tasks = _build_singh2012_tasks() + _build_mukasa2023_tasks()
     # Filter out already-completed pairs
     tasks = []
     for t in all_tasks:
@@ -226,7 +193,6 @@ def compute_all_references(output_dir: str = OUTPUT_DIR) -> dict:
     results_by_group = {
         "singh2012": dict(existing.get("singh2012", {})),
         "mukasa2023": dict(existing.get("mukasa2023", {})),
-        "gallic_acid": dict(existing.get("gallic_acid", {})),
     }
 
     for task in tasks:
@@ -260,7 +226,6 @@ def compute_all_references(output_dir: str = OUTPUT_DIR) -> dict:
             },
             "singh2012": results_by_group["singh2012"],
             "mukasa2023": results_by_group["mukasa2023"],
-            "gallic_acid": results_by_group["gallic_acid"],
         }
         with open(ref_file, "w") as f:
             json.dump(output, f, indent=2)

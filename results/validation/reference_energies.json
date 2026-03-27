@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "compute_date": "2026-03-26T10:43:42.859233",
+    "compute_date": "2026-03-26T12:37:50.376560",
     "dft_level": "wB97M-V/def2-TZVP",
     "bsse_corrected": true,
     "search_mode": "quantumdock"
@@ -126,58 +126,6 @@
       "search_info": {
         "n_orientations": 161,
         "xtb_best_sp": -3.804
-      }
-    },
-    "phe_tyrosine": {
-      "bsse_dE": -31.439,
-      "raw_dE": -11.174,
-      "solvent": "MeOH",
-      "best_direction": "site_21",
-      "search_info": {
-        "n_orientations": 153,
-        "xtb_best_sp": -5.616
-      }
-    },
-    "phe_leucine": {
-      "bsse_dE": -26.966,
-      "raw_dE": -10.743,
-      "solvent": "MeOH",
-      "best_direction": "site_22",
-      "search_info": {
-        "n_orientations": 163,
-        "xtb_best_sp": -5.752
-      }
-    },
-    "phe_dopamine": {
-      "bsse_dE": -30.732,
-      "raw_dE": -8.864,
-      "solvent": "MeOH",
-      "best_direction": "site_10",
-      "search_info": {
-        "n_orientations": 158,
-        "xtb_best_sp": -4.296
-      }
-    }
-  },
-  "gallic_acid": {
-    "gallic_AA": {
-      "bsse_dE": -22.345,
-      "raw_dE": -8.13,
-      "solvent": "Chloroform",
-      "best_direction": "site_14",
-      "search_info": {
-        "n_orientations": 202,
-        "xtb_best_sp": -5.135
-      }
-    },
-    "gallic_AAm": {
-      "bsse_dE": -22.545,
-      "raw_dE": -5.557,
-      "solvent": "Chloroform",
-      "best_direction": "site_17",
-      "search_info": {
-        "n_orientations": 195,
-        "xtb_best_sp": -5.171
       }
     }
   }
