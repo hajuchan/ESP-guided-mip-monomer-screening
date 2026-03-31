@@ -256,9 +256,9 @@ def validate_crosslinker(output_dir: str = OUTPUT_DIR) -> dict:
         "overall": "SKIP",
     }
 
-    cl_path = out / "features" / "stage2_crosslinker.json"
+    cl_path = out / "features" / "crosslinker.json"
     if not cl_path.exists():
-        logger.info("  E. stage2_crosslinker.json not found — SKIP")
+        logger.info("  E. crosslinker.json not found — SKIP")
         return result
 
     with open(cl_path) as f:

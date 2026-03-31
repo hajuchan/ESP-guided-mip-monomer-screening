@@ -118,7 +118,7 @@ def run_crosslinker_screening(
     # ── Save JSON ───────────────────────────────────────────────────
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    json_path = out_path / "stage2_crosslinker.json"
+    json_path = out_path / "crosslinker.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     logger.info(f"Results saved to {json_path}")

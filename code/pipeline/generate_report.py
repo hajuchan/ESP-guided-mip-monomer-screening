@@ -338,7 +338,7 @@ def _build_stage4(out: pathlib.Path) -> str:
 
 def _build_crosslinker(out: pathlib.Path) -> str:
     """Section 6 — Cross-linker screening results (optional)."""
-    cl_data = _load_json(out / "features" / "stage2_crosslinker.json")
+    cl_data = _load_json(out / "features" / "crosslinker.json")
     if cl_data is None:
         return ""  # completely omit section if not run
 
@@ -400,7 +400,7 @@ def _build_recommendations(out: pathlib.Path) -> str:
     """Section 8 — Final recommendations."""
     dft_data = _load_json(out / "stage2" / "stage2_dft.json")
     md_data = _load_json(out / "stage4" / "stage4_md.json")
-    cl_data = _load_json(out / "features" / "stage2_crosslinker.json")
+    cl_data = _load_json(out / "features" / "crosslinker.json")
     csv_rows = _load_csv(out / "stage3" / "stage3_selectivity.csv")
 
     if dft_data is None and md_data is None:

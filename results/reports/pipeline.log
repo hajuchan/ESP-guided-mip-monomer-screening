@@ -124,3 +124,20 @@
 2026-03-31 15:01:31,357 [Pipeline]   GPU DFT optimization (wb97xd+PCM)...
 2026-03-31 15:13:21,950 [Pipeline]         MAAD/Acetonitrile   : raw=-0.625, bsse=-14.375 kcal/mol
 2026-03-31 15:14:54,164 [Pipeline]         MAAD/Chloroform     : raw=-1.017, bsse=-11.240 kcal/mol
+2026-03-31 15:27:07,958 [Pipeline]         MAAD/MeOH           : raw=-0.630, bsse=-14.327 kcal/mol
+2026-03-31 15:38:46,994 [Pipeline] Template SMILES: CCCCCC=O
+2026-03-31 15:38:46,994 [Pipeline] Output directory: /home/chan/Research/MIP simulation/results
+2026-03-31 15:38:46,994 [Pipeline] 
+==================== STAGE 1 ====================
+2026-03-31 15:38:47,070 [Pipeline] Stage 1: Screening 11 monomers (mode=quantumdock)
+2026-03-31 15:38:47,107 [Pipeline]   11 monomers already computed, skipping
+2026-03-31 15:38:47,107 [Pipeline]   0 monomers to compute
+2026-03-31 15:38:47,108 [Pipeline] Stage 1 complete. Top 7: ['MAAD', 'Styrene', 'OPD', 'ACM', 'APB', 'AA', 'MAA']
+2026-03-31 15:38:47,108 [Pipeline] Stage 1 completed in 0.1s
+2026-03-31 15:38:47,108 [Pipeline] 
+==================== STAGE 2 ====================
+2026-03-31 15:38:47,108 [Pipeline] Stage 2: 21 to compute, 0 skipped (total 21, workers=2, GPU=True)
+2026-03-31 15:38:47,161 [Pipeline]     범함수 선택: wb97xd — H-bond 지배 (HBD=1+HBA=2=3)
+2026-03-31 15:38:47,161 [Pipeline]     범함수 선택: wb97xd — H-bond 지배 (HBD=1+HBA=2=3)
+2026-03-31 15:38:47,162 [Pipeline]   GPU DFT optimization (wb97xd+PCM)...
+2026-03-31 15:38:47,162 [Pipeline]   GPU DFT optimization (wb97xd+PCM)...

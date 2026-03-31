@@ -521,23 +521,46 @@ def run_stage2(template_smiles: str = None,
                 if "best_direction" in entry:
                     direction_map[entry["name"]] = entry["best_direction"]
 
-    n_tasks = len(monomers_to_run) * len(solvents)
-    max_workers = N_GPU_WORKERS if USE_GPU else N_WORKERS
-    logger.info(f"Stage 2: {len(monomers_to_run)} monomers × {len(solvents)} solvents = "
-                f"{n_tasks} DFT jobs (workers={max_workers}, GPU={USE_GPU})")
+    # ── Load existing results for skip logic ──
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    existing_results = {}
+    result_file = out_path / "stage2_dft.json"
+    if result_file.exists():
+        with open(result_file) as f:
+            existing_results = json.load(f)
 
-    results = {}
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for m_name, m_smiles in monomers_to_run.items():
-            # Get best direction: from Stage1, or run xTB surface scan
-            if m_name in direction_map:
-                best_dir = direction_map[m_name]
+    # Determine which (monomer, solvent) pairs need computation
+    skip_count = 0
+    pairs_to_run = []
+    for m_name, m_smiles in monomers_to_run.items():
+        for s_name, eps in solvents.items():
+            if (m_name in existing_results
+                    and s_name in existing_results[m_name]
+                    and existing_results[m_name][s_name].get("bsse_dE") is not None):
+                skip_count += 1
+                logger.info(f"  {m_name}/{s_name}: already computed, skipping")
             else:
-                logger.info(f"  {m_name}: no Stage1 direction, running xTB scan...")
-                best_dir = get_best_direction(template_smiles, m_smiles)
+                pairs_to_run.append((m_name, m_smiles, s_name, eps))
 
-            for s_name, eps in solvents.items():
+    n_total = len(monomers_to_run) * len(solvents)
+    max_workers = N_GPU_WORKERS if USE_GPU else N_WORKERS
+    logger.info(f"Stage 2: {len(pairs_to_run)} to compute, {skip_count} skipped "
+                f"(total {n_total}, workers={max_workers}, GPU={USE_GPU})")
+
+    results = dict(existing_results)  # Start with existing
+
+    if pairs_to_run:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for m_name, m_smiles, s_name, eps in pairs_to_run:
+                # Get best direction: from Stage1, or run xTB surface scan
+                if m_name in direction_map:
+                    best_dir = direction_map[m_name]
+                else:
+                    logger.info(f"  {m_name}: no Stage1 direction, running xTB scan...")
+                    best_dir = get_best_direction(template_smiles, m_smiles)
+
                 fut = executor.submit(
                     compute_dft_binding,
                     m_name, m_smiles, template_smiles, s_name, eps,
@@ -545,27 +568,28 @@ def run_stage2(template_smiles: str = None,
                 )
                 futures[fut] = (m_name, s_name)
 
-        for future in as_completed(futures):
-            m_name, s_name = futures[future]
-            res = future.result()
-            if res["success"]:
-                results.setdefault(m_name, {})[s_name] = {
-                    "raw_dE": res["raw_dE_kcal"],
-                    "bsse_dE": res["bsse_dE_kcal"],
-                    "bsse_correction": res["bsse_correction_kcal"],
-                }
-                logger.info(
-                    f"  {m_name:>10s}/{s_name:<15s}: "
-                    f"raw={res['raw_dE_kcal']:+.3f}, "
-                    f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
-                )
-            else:
-                logger.warning(f"  {m_name}/{s_name}: FAILED")
+            for future in as_completed(futures):
+                m_name, s_name = futures[future]
+                res = future.result()
+                if res["success"]:
+                    results.setdefault(m_name, {})[s_name] = {
+                        "raw_dE": res["raw_dE_kcal"],
+                        "bsse_dE": res["bsse_dE_kcal"],
+                        "bsse_correction": res["bsse_correction_kcal"],
+                    }
+                    logger.info(
+                        f"  {m_name:>10s}/{s_name:<15s}: "
+                        f"raw={res['raw_dE_kcal']:+.3f}, "
+                        f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
+                    )
+                    # Save incrementally after each pair
+                    with open(result_file, "w") as f:
+                        json.dump(results, f, indent=2)
+                else:
+                    logger.warning(f"  {m_name}/{s_name}: FAILED")
 
-    # Save
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    with open(out_path / "stage2_dft.json", "w") as f:
+    # Final save
+    with open(result_file, "w") as f:
         json.dump(results, f, indent=2)
 
     logger.info(f"Stage 2 complete. Results: {out_path / 'stage2_dft.json'}")

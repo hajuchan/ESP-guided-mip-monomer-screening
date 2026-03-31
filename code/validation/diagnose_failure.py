@@ -101,7 +101,7 @@ def diagnose_failures(output_dir: str = OUTPUT_DIR) -> list[str]:
 
         elif name == "E_crosslinker":
             diagnostics.extend([
-                f"[{name}] stage2_crosslinker.json 없음",
+                f"[{name}] crosslinker.json 없음",
                 f"[{name}] run_pipeline.py --crosslinker 실행",
                 f"[{name}] EGDMA WARNING 시 template 상호작용 확인",
             ])

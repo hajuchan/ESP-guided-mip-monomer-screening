@@ -232,7 +232,7 @@ def main():
 
     # ── Feature-only modes ───────────────────────────────────────────
     if args.crosslinker:
-        from .stage2_crosslinker import run_crosslinker_screening
+        from .crosslinker import run_crosslinker_screening
         run_crosslinker_screening(template_smiles=template,
                                   output_dir=_stage_dir(out_dir, "features"))
         return
@@ -295,7 +295,7 @@ def main():
     if args.stage == "all" and CROSSLINKER_SCREENING:
         logger.info(f"\n{'='*20} CROSS-LINKER {'='*20}")
         try:
-            from .stage2_crosslinker import run_crosslinker_screening
+            from .crosslinker import run_crosslinker_screening
             run_crosslinker_screening(template_smiles=template,
                                       output_dir=_stage_dir(out_dir, "features"))
         except Exception as e:

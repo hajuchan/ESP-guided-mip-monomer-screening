@@ -413,6 +413,23 @@ def run_stage4(template_smiles: str = None,
 
     logger.info(f"Stage 4: MD validation for {monomer_names}")
 
+    # ── Load existing results for skip logic ──
+    result_file = out_path / "stage4_md.json"
+    existing_results = []
+    existing_names = set()
+    if result_file.exists():
+        with open(result_file) as f:
+            existing_results = json.load(f)
+        if isinstance(existing_results, list):
+            existing_names = {r.get("monomer") for r in existing_results}
+        elif isinstance(existing_results, dict):
+            existing_names = set(existing_results.keys())
+            existing_results = [{"monomer": k, **v} for k, v in existing_results.items()]
+
+    skip_count = sum(1 for m in monomer_names if m in existing_names)
+    if skip_count > 0:
+        logger.info(f"  {skip_count} monomers already computed, skipping")
+
     # Get atom counts for template
     from rdkit import Chem
     from rdkit.Chem import AllChem
@@ -421,8 +438,11 @@ def run_stage4(template_smiles: str = None,
     AllChem.EmbedMolecule(template_rd, AllChem.ETKDGv3())
     template_n_atoms = template_rd.GetNumAtoms()
 
-    all_results = []
+    all_results = list(existing_results)
     for m_name in monomer_names:
+        if m_name in existing_names:
+            logger.info(f"  {m_name}: already computed, skipping")
+            continue
         if m_name not in monomer_library:
             logger.warning(f"Monomer {m_name} not in library, skipping")
             continue
@@ -493,6 +513,10 @@ def run_stage4(template_smiles: str = None,
             # Plot ratio comparison RDF
             _plot_ratio_rdf(m_name, ratio_results, output_dir)
             all_results.append(result)
+            # Incremental save
+            with open(result_file, "w") as f:
+                json.dump(all_results, f, indent=2, default=str)
+            existing_names.add(m_name)
         else:
             # --- Single ratio mode (legacy) ---
             try:
@@ -504,6 +528,10 @@ def run_stage4(template_smiles: str = None,
                     template_n_atoms, monomer_n_atoms
                 )
                 all_results.append(result)
+                # Incremental save
+                with open(result_file, "w") as f:
+                    json.dump(all_results, f, indent=2, default=str)
+                existing_names.add(m_name)
             except Exception as e:
                 logger.error(f"Stage 4 failed for {m_name}: {e}")
                 continue

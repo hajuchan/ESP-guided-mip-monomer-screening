@@ -745,26 +745,46 @@ def run_stage1(template_smiles: str = None,
                 f"(mode={COMPLEX_SEARCH_MODE})")
     template_mol = smiles_to_mol3d(template_smiles)
 
-    results = []
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
-        futures = {
-            executor.submit(compute_binding_energy, name, smiles, template_mol): name
-            for name, smiles in monomer_library.items()
-        }
-        for future in as_completed(futures):
-            res = future.result()
-            if res["success"]:
-                results.append(res)
-                logger.info(f"  {res['name']:>10s}: dE = {res['dE_kcal']:+.3f} kcal/mol")
-            else:
-                logger.warning(f"  {res['name']:>10s}: FAILED — {res.get('error', '?')}")
+    # ── Load existing results for skip logic ──
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    existing_results = []
+    existing_names = set()
+    all_json = out_path / "stage1_all.json"
+    if all_json.exists():
+        with open(all_json) as f:
+            existing_results = json.load(f)
+        existing_names = {r["name"] for r in existing_results if r.get("success")}
+
+    monomers_to_run = {n: s for n, s in monomer_library.items()
+                       if n not in existing_names}
+    skip_count = len(monomer_library) - len(monomers_to_run)
+    if skip_count > 0:
+        logger.info(f"  {skip_count} monomers already computed, skipping")
+    logger.info(f"  {len(monomers_to_run)} monomers to compute")
+
+    results = list(existing_results)
+    if monomers_to_run:
+        with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
+            futures = {
+                executor.submit(compute_binding_energy, name, smiles, template_mol): name
+                for name, smiles in monomers_to_run.items()
+            }
+            for future in as_completed(futures):
+                res = future.result()
+                if res["success"]:
+                    results.append(res)
+                    logger.info(f"  {res['name']:>10s}: dE = {res['dE_kcal']:+.3f} kcal/mol")
+                    # Save incrementally
+                    with open(all_json, "w") as f:
+                        json.dump(results, f, indent=2)
+                else:
+                    logger.warning(f"  {res['name']:>10s}: FAILED — {res.get('error', '?')}")
 
     results.sort(key=lambda r: r["dE_kcal"])
     top_results = results[:top_n]
 
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    with open(out_path / "stage1_all.json", "w") as f:
+    with open(all_json, "w") as f:
         json.dump(results, f, indent=2)
     with open(out_path / "stage1_top.json", "w") as f:
         json.dump(top_results, f, indent=2)

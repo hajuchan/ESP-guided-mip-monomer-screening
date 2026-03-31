@@ -93,40 +93,57 @@ def compute_interferent_binding(template_smiles: str,
     from .stage2_dft import compute_dft_binding
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
+    # ── Load existing results for skip logic ──
+    cache_path = Path(output_dir) / "stage3_interferent_dft.json"
     results = {}
+    if cache_path.exists():
+        with open(cache_path) as f:
+            results = json.load(f)
+
     tasks = []
+    skip_count = 0
     for interf_name, interf_smiles in interferent_library.items():
         for m_name in monomer_names:
             m_smiles = monomer_library[m_name]
             for s_name, eps in solvents.items():
-                tasks.append((interf_name, m_name, m_smiles, interf_smiles, s_name, eps))
+                if (interf_name in results
+                        and m_name in results[interf_name]
+                        and s_name in results[interf_name][m_name]):
+                    skip_count += 1
+                else:
+                    tasks.append((interf_name, m_name, m_smiles, interf_smiles, s_name, eps))
 
-    logger.info(f"Computing {len(tasks)} interferent-monomer DFT jobs")
+    total = len(interferent_library) * len(monomer_names) * len(solvents)
+    logger.info(f"Computing {len(tasks)} interferent-monomer DFT jobs "
+                f"({skip_count} skipped, {total} total)")
 
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
-        futures = {}
-        for interf_name, m_name, m_smiles, interf_smiles, s_name, eps in tasks:
-            fut = executor.submit(
-                compute_dft_binding,
-                m_name, m_smiles, interf_smiles, s_name, eps
-            )
-            futures[fut] = (interf_name, m_name, s_name)
-
-        for future in as_completed(futures):
-            interf_name, m_name, s_name = futures[future]
-            res = future.result()
-            if res["success"]:
-                results.setdefault(interf_name, {}).setdefault(m_name, {})[s_name] = \
-                    res["bsse_dE_kcal"]
-                logger.info(
-                    f"  {interf_name}/{m_name}/{s_name}: "
-                    f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
+    if tasks:
+        with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
+            futures = {}
+            for interf_name, m_name, m_smiles, interf_smiles, s_name, eps in tasks:
+                fut = executor.submit(
+                    compute_dft_binding,
+                    m_name, m_smiles, interf_smiles, s_name, eps
                 )
-            else:
-                logger.warning(f"  {interf_name}/{m_name}/{s_name}: FAILED")
+                futures[fut] = (interf_name, m_name, s_name)
 
-    # Cache
-    cache_path = Path(output_dir) / "stage3_interferent_dft.json"
+            for future in as_completed(futures):
+                interf_name, m_name, s_name = futures[future]
+                res = future.result()
+                if res["success"]:
+                    results.setdefault(interf_name, {}).setdefault(m_name, {})[s_name] = \
+                        res["bsse_dE_kcal"]
+                    logger.info(
+                        f"  {interf_name}/{m_name}/{s_name}: "
+                        f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
+                    )
+                    # Incremental save
+                    with open(cache_path, "w") as f:
+                        json.dump(results, f, indent=2)
+                else:
+                    logger.warning(f"  {interf_name}/{m_name}/{s_name}: FAILED")
+
+    # Final save
     with open(cache_path, "w") as f:
         json.dump(results, f, indent=2)
     return results
