@@ -1,0 +1,18 @@
+{
+  "model_name": "RandomForest(n=100,d=3)",
+  "loo_cv_rmse": 0.48,
+  "residual_std": 0.4827,
+  "n_training": 10,
+  "cv_results": {
+    "LinearRegression": {
+      "rmse": 0.7691
+    },
+    "Ridge(alpha=1.0)": {
+      "rmse": 0.5656
+    },
+    "RandomForest(n=100,d=3)": {
+      "rmse": 0.48
+    }
+  },
+  "predictions": []
+}

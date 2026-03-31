@@ -1,0 +1,143 @@
+{
+  "timestamp": "2026-03-30T14:26:17.474375",
+  "pipeline_version": "v6 (adaptive functional + Stage 3 selectivity)",
+  "legacy_validation": {
+    "numerical": {
+      "overall": "FAIL",
+      "n_pass": 0,
+      "n_fail": 6,
+      "n_skip": 0,
+      "systematic_bias_mean": -6.2651666666666666,
+      "systematic_bias_std": 1.670488792406449,
+      "per_pair": {
+        "heptachlor_MAA": {
+          "status": "FAIL",
+          "diff": 6.212,
+          "ref": -8.11,
+          "computed": -14.322
+        },
+        "heptachlor_4VP": {
+          "status": "FAIL",
+          "diff": 5.196,
+          "ref": -7.76,
+          "computed": -12.956
+        },
+        "heptachlor_styrene": {
+          "status": "FAIL",
+          "diff": 9.452000000000002,
+          "ref": -4.13,
+          "computed": -13.582
+        },
+        "DDT_MAA": {
+          "status": "FAIL",
+          "diff": 4.48,
+          "ref": -8.99,
+          "computed": -13.47
+        },
+        "DDT_4VP": {
+          "status": "FAIL",
+          "diff": 7.178,
+          "ref": -7.86,
+          "computed": -15.038
+        },
+        "DDT_styrene": {
+          "status": "FAIL",
+          "diff": 5.073,
+          "ref": -8.28,
+          "computed": -13.353
+        }
+      }
+    },
+    "ranking": {
+      "heptachlor": {
+        "rho": null,
+        "p_value": null,
+        "status": "SKIP",
+        "computed_rank": "N/A",
+        "IF_rank": "N/A"
+      },
+      "DDT": {
+        "rho": null,
+        "p_value": null,
+        "status": "SKIP",
+        "computed_rank": "N/A",
+        "IF_rank": "N/A"
+      },
+      "overall": "PASS"
+    },
+    "selectivity": {
+      "OPD_rank": 4,
+      "PYR_rank": 6,
+      "direction_correct": true,
+      "overall": "FAIL",
+      "full_ranking": [
+        "ACM",
+        "4VB",
+        "APB",
+        "OPD",
+        "MAA",
+        "PYR"
+      ]
+    }
+  },
+  "feature_validation": {
+    "A_multidirectional": {
+      "best_direction_field_exists": false,
+      "best_is_minimum": true,
+      "multidirectional_vs_single_improvement": {},
+      "hbond_structure_check": "SKIP",
+      "overall": "SKIP"
+    },
+    "B_solvent_strategy": {
+      "strategy_valid": true,
+      "synthesis_solvent_exists": true,
+      "csv_has_selected_solvent_column": false,
+      "solvent_consistency": true,
+      "overall": "PASS"
+    },
+    "C_ratio_screening": {
+      "ratio_results_present": false,
+      "all_ratios_computed": false,
+      "ebn_trend_valid": true,
+      "overall": "SKIP"
+    },
+    "D_esp_map": {
+      "esp_files_present": false,
+      "top3_esp_complete": false,
+      "cube_files_present": false,
+      "images_valid": true,
+      "overall": "SKIP"
+    },
+    "E_crosslinker": {
+      "all_crosslinkers_present": false,
+      "assessment_fields_valid": false,
+      "egdma_weak_binding": false,
+      "overall": "SKIP"
+    },
+    "F_report": {
+      "report_file_exists": false,
+      "required_sections_present": false,
+      "images_embedded": false,
+      "references_present": false,
+      "overall": "SKIP"
+    },
+    "G_interferent_suggestion": {
+      "function_callable": true,
+      "tyrosine_suggested": true,
+      "tanimoto_range_valid": true,
+      "output_format_valid": true,
+      "overall": "PASS"
+    },
+    "H_if_prediction": {
+      "loo_rmse_acceptable": false,
+      "predictions_in_range": true,
+      "feature_count_valid": true,
+      "model_saved": false,
+      "rank_consistency": true,
+      "overall": "FAIL"
+    }
+  },
+  "overall": "FAIL",
+  "n_pass": 8,
+  "n_total": 11
+}

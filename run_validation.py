@@ -4,31 +4,37 @@ MIP Pipeline Validation — 프로젝트 루트 실행 파일
 =================================================
 사용법:
     conda activate MIPscreen
-    cd "/home/chan/Research/MIP simulation"
+    cd "MIP simulation"
 
-    # 문헌 기준값 DFT 계산 + 전체 검증
-    python run_validation.py --compute --stage all
+    # 전체 계산 + 검증 (처음 실행 시)
+    python run_validation.py --all-compute --stage all
+
+    # 개별 단계 실행
+    python run_validation.py --compute         # Step 1: monomer-template DFT
+    python run_validation.py --selectivity     # Step 2: monomer-interferent DFT (Stage 3)
+    python run_validation.py --md              # Step 3: Stage 4 MD 시뮬레이션
+
+    # 순위 비교만 (이미 계산된 결과 사용)
+    python run_validation.py --rank            # Stage 2/3/4 순위 vs 실험 IF
 
     # 기존 결과로 검증만 실행
     python run_validation.py --load-only --stage all
 
-    # 문헌 기준값 DFT 계산만 (19 pair: Singh 6 + Mukasa 9 + Gallic Acid 4)
-    python run_validation.py --compute
+    # 특정 monomer만 MD 실행
+    python run_validation.py --md --md-monomers OPD MAA PYR
 
-    # 특정 검증만 실행
-    python run_validation.py --load-only --stage numerical   # 수치 재현성
-    python run_validation.py --load-only --stage ranking     # IF 순위 상관
-    python run_validation.py --load-only --stage selectivity # 선택도 방향
-    python run_validation.py --load-only --stage new_features # 추가 기능 검증
+계산 단계:
+    Step 1 (--compute):     monomer-template DFT → reference_energies.json
+    Step 2 (--selectivity): monomer-interferent DFT → selectivity_data.json
+    Step 3 (--md):          50ns MD × 6 monomers → stage4_md.json
 
-검증 대상 (19 pair):
-    Singh 2012 (6):  Heptachlor × (MAA, 4VP, Styrene) + DDT × (MAA, 4VP, Styrene)
-    Mukasa 2023 (9): Phe × (OPD, MAA, 4VB, APB, ACM, PYR) + interferents (3)
-    Pardeshi 2012 (4): Gallic Acid × (AA, AAm, 4VP, MMA)
+검증 대상:
+    Singh 2012 (6):   Heptachlor × (MAA, 4VP, Styrene) + DDT × (MAA, 4VP, Styrene)
+    Mukasa 2023 (6):  Phe × (OPD, MAA, 4VB, APB, ACM, PYR)
+    Interferents (5): Tyrosine, Valine, Leucine, Isoleucine, Dopamine
 
 설정:
     모든 설정은 code/pipeline/config.py 에서 변경합니다.
-    검증 기준값은 code/validation/config_validation.py 에 정의되어 있습니다.
 """
 import sys
 from pathlib import Path

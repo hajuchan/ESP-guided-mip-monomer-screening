@@ -41,7 +41,7 @@ SOLVENTS = {
 }
 
 # ── Pipeline Parameters ─────────────────────────────────────────────
-STAGE1_TOP_N = 7      # Number of monomers passed from xTB screening
+STAGE1_TOP_N = 20      # Number of monomers passed from xTB screening
 STAGE3_TOP_N = 3       # Number of monomers sent to MD verification
 N_WORKERS    = 16      # CPU parallel processes
 N_GPU_WORKERS = 2      # GPU parallel processes (limited by VRAM)
@@ -105,10 +105,10 @@ SOLVENT_STRATEGY = "synthesis_match"
 # "minimum"         — 가장 음수인 결합에너지 (최대 결합력 기준)
 # "average"         — 전 용매 평균
 # "worst"           — 가장 약한 결합에너지 (보수적 평가)
-SYNTHESIS_SOLVENT = "Acetonitrile"
+SYNTHESIS_SOLVENT = "Chloroform"
 
 # Feature 3: Template:Monomer 비율 스크리닝
-MD_RATIO_SCREENING = False      # True면 비율별 스크리닝
+MD_RATIO_SCREENING = True       # True면 비율별 스크리닝
 MD_RATIOS_TO_TEST = [1, 2, 4]   # 테스트할 비율 목록
 MD_TEMPLATE_MONOMER_RATIO = 4   # 고정 비율 (MD_RATIO_SCREENING=False 시)
 
@@ -122,5 +122,5 @@ CROSSLINKER_LIBRARY = {
     "TRIM":  "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
     "BAM":   "C=CC(=O)NCCNC(=O)C=C",
 }
-CROSSLINKER_SCREENING = False
+CROSSLINKER_SCREENING = True
 CROSSLINKER_THRESHOLD = -1.0  # kcal/mol — 이보다 강하면 부적합 경고

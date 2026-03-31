@@ -1,0 +1,126 @@
+2026-03-31 12:59:48,799 [Pipeline] Template SMILES: CCCCCC=O
+2026-03-31 12:59:48,799 [Pipeline] Output directory: /home/chan/Research/MIP simulation/results
+2026-03-31 12:59:48,799 [Pipeline] 
+==================== STAGE 1 ====================
+2026-03-31 12:59:49,098 [Pipeline] Stage 1: Screening 11 monomers (mode=quantumdock)
+2026-03-31 12:59:49,577 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,577 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,577 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,577 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,578 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,579 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,579 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,579 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,579 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,579 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 12:59:49,579 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-03-31 13:03:24,169 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:03:24,369 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:03:24,369 [Pipeline]   [PYR] 137 ESP + 0 Vina = 137 total orientations
+2026-03-31 13:03:31,068 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:03:31,228 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:03:31,228 [Pipeline]   [AA] 134 ESP + 0 Vina = 134 total orientations
+2026-03-31 13:03:41,421 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:03:41,576 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:03:41,576 [Pipeline]   [ACM] 152 ESP + 0 Vina = 152 total orientations
+2026-03-31 13:03:44,136 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:03:44,342 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:03:44,342 [Pipeline]   [MAA] 122 ESP + 0 Vina = 122 total orientations
+2026-03-31 13:03:51,569 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:03:51,711 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:03:51,711 [Pipeline]   [MAAD] 118 ESP + 0 Vina = 118 total orientations
+2026-03-31 13:04:00,930 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:04:01,135 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:04:01,136 [Pipeline]   [4VP] 110 ESP + 0 Vina = 110 total orientations
+2026-03-31 13:04:03,587 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:04:03,951 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:04:03,958 [Pipeline]   [Styrene] 121 ESP + 0 Vina = 121 total orientations
+2026-03-31 13:04:04,634 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:04:05,172 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:04:05,172 [Pipeline]   [OPD] 104 ESP + 0 Vina = 104 total orientations
+2026-03-31 13:04:08,735 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:04:09,261 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:04:09,261 [Pipeline]   [NVP] 122 ESP + 0 Vina = 122 total orientations
+2026-03-31 13:04:16,663 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:04:17,280 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:04:17,280 [Pipeline]   [APB] 126 ESP + 0 Vina = 126 total orientations
+2026-03-31 13:04:20,031 [Pipeline] NumExpr defaulting to 12 threads.
+2026-03-31 13:04:20,432 [Pipeline]     Vina docking failed: 'MoleculePreparation' object has no attribute 'restraints'
+2026-03-31 13:04:20,438 [Pipeline]   [4VB] 146 ESP + 0 Vina = 146 total orientations
+2026-03-31 14:02:21,210 [Pipeline]   [OPD] Phase 1 SP → top 10 (best: -3.493 kcal/mol)
+2026-03-31 14:02:21,319 [Pipeline]   [OPD] Phase 2 refine: 44 orientations near top 3 sites
+2026-03-31 14:05:16,915 [Pipeline]   [MAA] Phase 1 SP → top 10 (best: -3.079 kcal/mol)
+2026-03-31 14:05:16,968 [Pipeline]   [MAA] Phase 2 refine: 48 orientations near top 3 sites
+2026-03-31 14:05:27,589 [Pipeline]   [AA] Phase 1 SP → top 10 (best: -3.426 kcal/mol)
+2026-03-31 14:05:27,658 [Pipeline]   [AA] Phase 2 refine: 61 orientations near top 3 sites
+2026-03-31 14:07:13,649 [Pipeline]   [4VP] Phase 1 SP → top 10 (best: -3.358 kcal/mol)
+2026-03-31 14:07:13,804 [Pipeline]   [4VP] Phase 2 refine: 59 orientations near top 3 sites
+2026-03-31 14:11:25,907 [Pipeline]   [PYR] Phase 1 SP → top 10 (best: -2.655 kcal/mol)
+2026-03-31 14:11:25,985 [Pipeline]   [PYR] Phase 2 refine: 63 orientations near top 3 sites
+2026-03-31 14:11:53,661 [Pipeline]   [Styrene] Phase 1 SP → top 10 (best: -3.055 kcal/mol)
+2026-03-31 14:11:53,813 [Pipeline]   [Styrene] Phase 2 refine: 55 orientations near top 3 sites
+2026-03-31 14:14:51,149 [Pipeline]   [MAAD] Phase 1 SP → top 10 (best: -1.301 kcal/mol)
+2026-03-31 14:14:51,205 [Pipeline]   [MAAD] Phase 2 refine: 64 orientations near top 3 sites
+2026-03-31 14:18:42,111 [Pipeline]   [ACM] Phase 1 SP → top 10 (best: -1.593 kcal/mol)
+2026-03-31 14:18:42,212 [Pipeline]   [ACM] Phase 2 refine: 53 orientations near top 3 sites
+2026-03-31 14:19:58,278 [Pipeline]   [NVP] Phase 1 SP → top 10 (best: -2.109 kcal/mol)
+2026-03-31 14:19:58,304 [Pipeline]   [NVP] Phase 2 refine: 53 orientations near top 3 sites
+2026-03-31 14:27:41,122 [Pipeline]   [OPD] After merge: best=-4.022
+2026-03-31 14:28:54,900 [Pipeline]     E_template=-23.013502, E_monomer=-22.747985 Ha
+2026-03-31 14:29:17,056 [Pipeline]   [APB] Phase 1 SP → top 10 (best: -4.049 kcal/mol)
+2026-03-31 14:29:17,087 [Pipeline]   [APB] Phase 2 refine: 54 orientations near top 3 sites
+2026-03-31 14:30:00,442 [Pipeline]   [MAA] After merge: best=-3.079
+2026-03-31 14:31:16,759 [Pipeline]     E_template=-23.013502, E_monomer=-19.733292 Ha
+2026-03-31 14:34:40,665 [Pipeline]   [AA] After merge: best=-3.426
+2026-03-31 14:35:54,604 [Pipeline]     E_template=-23.013502, E_monomer=-16.562813 Ha
+2026-03-31 14:38:53,419 [Pipeline]   [PYR] After merge: best=-2.655
+2026-03-31 14:40:03,383 [Pipeline]     E_template=-23.013502, E_monomer=-14.016821 Ha
+2026-03-31 14:40:40,743 [Pipeline]   [4VP] After merge: best=-3.358
+2026-03-31 14:41:52,641 [Pipeline]   [Styrene] After merge: best=-3.971
+2026-03-31 14:42:02,677 [Pipeline]     E_template=-23.013502, E_monomer=-21.429073 Ha
+2026-03-31 14:42:52,008 [Pipeline]   [MAA] Optimized → dE=-3.200 kcal/mol, site: atom 13 (H, vdW/electrostatic)
+2026-03-31 14:42:52,042 [Pipeline]          MAA: dE = -3.200 kcal/mol
+2026-03-31 14:43:05,728 [Pipeline]     E_template=-23.013502, E_monomer=-21.157654 Ha
+2026-03-31 14:43:48,963 [Pipeline]   [OPD] Optimized → dE=-3.617 kcal/mol, site: atom 17 (H, vdW/electrostatic)
+2026-03-31 14:43:49,018 [Pipeline]          OPD: dE = -3.617 kcal/mol
+2026-03-31 14:44:06,094 [Pipeline]   [ACM] After merge: best=-3.604
+2026-03-31 14:45:13,732 [Pipeline]     E_template=-23.013502, E_monomer=-15.923102 Ha
+2026-03-31 14:46:48,758 [Pipeline]   [AA] Optimized → dE=-3.414 kcal/mol, site: atom 6 (O, acceptor)
+2026-03-31 14:46:48,776 [Pipeline]           AA: dE = -3.414 kcal/mol
+2026-03-31 14:49:43,292 [Pipeline]   [PYR] Optimized → dE=-2.526 kcal/mol, site: atom 11 (H, vdW/electrostatic)
+2026-03-31 14:49:43,318 [Pipeline]          PYR: dE = -2.526 kcal/mol
+2026-03-31 14:50:18,748 [Pipeline]   [NVP] After merge: best=-3.069
+2026-03-31 14:50:49,084 [Pipeline]   [MAAD] After merge: best=-4.346
+2026-03-31 14:50:55,399 [Pipeline]   [4VB] Phase 1 SP → top 10 (best: -3.973 kcal/mol)
+2026-03-31 14:50:55,422 [Pipeline]   [4VB] Phase 2 refine: 72 orientations near top 3 sites
+2026-03-31 14:51:14,785 [Pipeline]     E_template=-23.013502, E_monomer=-24.428856 Ha
+2026-03-31 14:51:48,797 [Pipeline]     E_template=-23.013502, E_monomer=-19.092718 Ha
+2026-03-31 14:53:01,422 [Pipeline]   [4VP] Optimized → dE=-3.186 kcal/mol, site: atom 6 (O, acceptor)
+2026-03-31 14:53:01,464 [Pipeline]          4VP: dE = -3.186 kcal/mol
+2026-03-31 14:53:19,055 [Pipeline]   [ACM] Optimized → dE=-3.529 kcal/mol, site: atom 11 (H, vdW/electrostatic)
+2026-03-31 14:53:19,082 [Pipeline]          ACM: dE = -3.529 kcal/mol
+2026-03-31 14:53:26,756 [Pipeline]   [Styrene] Optimized → dE=-3.884 kcal/mol, site: atom 13 (H, vdW/electrostatic)
+2026-03-31 14:53:26,763 [Pipeline]      Styrene: dE = -3.884 kcal/mol
+2026-03-31 14:55:59,115 [Pipeline]   [APB] After merge: best=-4.049
+2026-03-31 14:56:43,089 [Pipeline]     E_template=-23.013502, E_monomer=-29.250758 Ha
+2026-03-31 14:57:24,350 [Pipeline]   [NVP] Optimized → dE=-2.980 kcal/mol, site: atom 7 (H, vdW/electrostatic)
+2026-03-31 14:57:24,372 [Pipeline]          NVP: dE = -2.980 kcal/mol
+2026-03-31 14:57:38,185 [Pipeline]   [MAAD] Optimized → dE=-4.235 kcal/mol, site: atom 14 (H, vdW/electrostatic)
+2026-03-31 14:57:38,194 [Pipeline]         MAAD: dE = -4.235 kcal/mol
+2026-03-31 14:59:57,560 [Pipeline]   [APB] Optimized → dE=-3.495 kcal/mol, site: atom 16 (H, vdW/electrostatic)
+2026-03-31 14:59:57,566 [Pipeline]          APB: dE = -3.495 kcal/mol
+2026-03-31 15:00:47,224 [Pipeline]   [4VB] After merge: best=-3.973
+2026-03-31 15:00:54,136 [Pipeline]     E_template=-23.013502, E_monomer=-31.086582 Ha
+2026-03-31 15:01:30,426 [Pipeline]   [4VB] Optimized → dE=-2.440 kcal/mol, site: atom 18 (H, vdW/electrostatic)
+2026-03-31 15:01:30,431 [Pipeline]          4VB: dE = -2.440 kcal/mol
+2026-03-31 15:01:31,220 [Pipeline] Stage 1 complete. Top 7: ['MAAD', 'Styrene', 'OPD', 'ACM', 'APB', 'AA', 'MAA']
+2026-03-31 15:01:31,221 [Pipeline] Stage 1 completed in 7302.4s
+2026-03-31 15:01:31,221 [Pipeline] 
+==================== STAGE 2 ====================
+2026-03-31 15:01:31,227 [Pipeline] Stage 2: 7 monomers × 3 solvents = 21 DFT jobs (workers=2, GPU=True)
+2026-03-31 15:01:31,356 [Pipeline]     범함수 선택: wb97xd — H-bond 지배 (HBD=1+HBA=2=3)
+2026-03-31 15:01:31,356 [Pipeline]     범함수 선택: wb97xd — H-bond 지배 (HBD=1+HBA=2=3)
+2026-03-31 15:01:31,357 [Pipeline]   GPU DFT optimization (wb97xd+PCM)...
+2026-03-31 15:01:31,357 [Pipeline]   GPU DFT optimization (wb97xd+PCM)...
+2026-03-31 15:13:21,950 [Pipeline]         MAAD/Acetonitrile   : raw=-0.625, bsse=-14.375 kcal/mol
+2026-03-31 15:14:54,164 [Pipeline]         MAAD/Chloroform     : raw=-1.017, bsse=-11.240 kcal/mol

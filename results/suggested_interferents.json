@@ -1,0 +1,50 @@
+[
+  {
+    "name": "Tyrosine",
+    "smiles": "NC(Cc1ccc(O)cc1)C(=O)O",
+    "tanimoto": 0.7037,
+    "source": "builtin"
+  },
+  {
+    "name": "Tryptophan",
+    "smiles": "NC(Cc1c[nH]c2ccccc12)C(=O)O",
+    "tanimoto": 0.5,
+    "source": "builtin"
+  },
+  {
+    "name": "Histidine",
+    "smiles": "NC(Cc1cnc[nH]1)C(=O)O",
+    "tanimoto": 0.4286,
+    "source": "builtin"
+  },
+  {
+    "name": "Serine",
+    "smiles": "NC(CO)C(=O)O",
+    "tanimoto": 0.4231,
+    "source": "builtin"
+  },
+  {
+    "name": "Ibuprofen",
+    "smiles": "CC(C)Cc1ccc(cc1)C(C)C(=O)O",
+    "tanimoto": 0.3824,
+    "source": "builtin"
+  },
+  {
+    "name": "Leucine",
+    "smiles": "CC(C)CC(N)C(=O)O",
+    "tanimoto": 0.3793,
+    "source": "builtin"
+  },
+  {
+    "name": "Methionine",
+    "smiles": "CSCC[C@@H](N)C(=O)O",
+    "tanimoto": 0.3438,
+    "source": "builtin"
+  },
+  {
+    "name": "Alanine",
+    "smiles": "C[C@@H](N)C(=O)O",
+    "tanimoto": 0.3077,
+    "source": "builtin"
+  }
+]
