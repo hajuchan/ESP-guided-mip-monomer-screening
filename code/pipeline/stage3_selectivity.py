@@ -91,6 +91,11 @@ def compute_interferent_binding(template_smiles: str,
     Returns {interferent: {monomer: {solvent: bsse_dE}}}
     """
     from .stage2_dft import compute_dft_binding
+    from .stage1_xtb import (
+        smiles_to_mol3d, generate_docked_orientations,
+        screen_orientations_sp, optimize_top_candidates,
+        _adaptive_n_orientations,
+    )
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     # ── Load existing results for skip logic ──
@@ -118,18 +123,30 @@ def compute_interferent_binding(template_smiles: str,
                 f"({skip_count} skipped, {total} total)")
 
     if tasks:
-        with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
-            futures = {}
-            for interf_name, m_name, m_smiles, interf_smiles, s_name, eps in tasks:
-                fut = executor.submit(
-                    compute_dft_binding,
-                    m_name, m_smiles, interf_smiles, s_name, eps
-                )
-                futures[fut] = (interf_name, m_name, s_name)
+        for interf_name, m_name, m_smiles, interf_smiles, s_name, eps in tasks:
+            try:
+                # Same protocol as Stage 2: xTB docking → DFT
+                # Interferent acts as "template" in docking
+                interf_mol = smiles_to_mol3d(interf_smiles)
+                mono_mol = smiles_to_mol3d(m_smiles)
 
-            for future in as_completed(futures):
-                interf_name, m_name, s_name = futures[future]
-                res = future.result()
+                n_orient = _adaptive_n_orientations(interf_mol, mono_mol)
+                orientations = generate_docked_orientations(
+                    interf_mol, mono_mol, n_orientations=n_orient,
+                )
+                if len(orientations) == 0:
+                    logger.warning(f"  {interf_name}/{m_name}: all orientations clashed")
+                    continue
+
+                top = screen_orientations_sp(interf_mol, orientations, top_n=10)
+                opt = optimize_top_candidates(interf_mol, mono_mol, top)
+                complex_mol = opt.get("best_complex_mol")
+
+                res = compute_dft_binding(
+                    m_name, m_smiles, interf_smiles, s_name, eps,
+                    prebuilt_complex_mol=complex_mol,
+                )
+
                 if res["success"]:
                     results.setdefault(interf_name, {}).setdefault(m_name, {})[s_name] = \
                         res["bsse_dE_kcal"]
@@ -137,11 +154,14 @@ def compute_interferent_binding(template_smiles: str,
                         f"  {interf_name}/{m_name}/{s_name}: "
                         f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
                     )
-                    # Incremental save
-                    with open(cache_path, "w") as f:
-                        json.dump(results, f, indent=2)
                 else:
-                    logger.warning(f"  {interf_name}/{m_name}/{s_name}: FAILED")
+                    logger.warning(f"  {interf_name}/{m_name}/{s_name}: DFT FAILED")
+            except Exception as e:
+                logger.warning(f"  {interf_name}/{m_name}/{s_name}: FAILED — {e}")
+
+            # Incremental save after each pair
+            with open(cache_path, "w") as f:
+                json.dump(results, f, indent=2)
 
     # Final save
     with open(cache_path, "w") as f:
