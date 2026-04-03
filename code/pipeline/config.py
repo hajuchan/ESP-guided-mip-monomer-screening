@@ -41,8 +41,8 @@ SOLVENTS = {
 # ── Pipeline Parameters ─────────────────────────────────────────────
 STAGE1_TOP_N = 7       # Number of monomers passed from xTB screening
 STAGE3_TOP_N = 3       # Number of monomers sent to MD verification
-N_WORKERS    = 16      # CPU parallel processes
-N_GPU_WORKERS = 2      # GPU parallel processes (limited by VRAM)
+N_WORKERS    = 11      # CPU parallel processes
+N_GPU_WORKERS = 1      # GPU parallel processes (limited by VRAM)
 USE_GPU      = True    # Use GPU acceleration when available
 from pathlib import Path as _Path
 OUTPUT_DIR   = str(_Path(__file__).resolve().parent.parent.parent / "results")
