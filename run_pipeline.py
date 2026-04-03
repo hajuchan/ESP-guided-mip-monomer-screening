@@ -4,7 +4,7 @@ MIP Screening Pipeline — 프로젝트 루트 실행 파일
 ================================================
 사용법:
     conda activate MIPscreen
-    cd "/home/chan/Research/MIP simulation"
+    cd MIP_simulation
 
     # 전체 파이프라인 실행 (Stage 1→2→3→4)
     python run_pipeline.py

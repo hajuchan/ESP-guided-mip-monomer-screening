@@ -6,7 +6,7 @@ monomer-interferent 결합에너지를 계산하고, 범함수별 Stage 3 선택
 
 사용법:
     conda activate MIPscreen
-    cd "/home/chan/Research/MIP simulation"
+    cd MIP_simulation
 
     # monomer-interferent DFT 계산 (60개: 6 monomer × 5 interferent × 2 범함수)
     python run_selectivity.py --compute

@@ -550,21 +550,49 @@ def run_stage2(template_smiles: str = None,
 
     results = dict(existing_results)  # Start with existing
 
+    # ── Load optimized complex coordinates from Stage 1 ──
+    complex_mol_map = {}
+    if stage1_path.exists():
+        with open(stage1_path) as f:
+            stage1_data = json.load(f)
+        for entry in stage1_data:
+            coords = entry.get("complex_coords")
+            if coords and entry.get("name"):
+                # Rebuild RDKit Mol from stored coordinates
+                from rdkit import Chem
+                from rdkit.Chem import AllChem
+                from rdkit.Geometry import Point3D
+                template_mol_tmp = smiles_to_mol3d(template_smiles)
+                monomer_mol_tmp = smiles_to_mol3d(entry["name"]
+                    if entry["name"] not in monomer_library
+                    else monomer_library[entry["name"]])
+                # Build combined mol with Stage 1 optimized coordinates
+                try:
+                    combo = Chem.CombineMols(template_mol_tmp, monomer_mol_tmp)
+                    combo = Chem.RWMol(combo)
+                    conf = combo.GetConformer()
+                    for i, (sym, x, y, z) in enumerate(coords):
+                        if i < combo.GetNumAtoms():
+                            conf.SetAtomPosition(i, Point3D(x, y, z))
+                    complex_mol_map[entry["name"]] = combo.GetMol()
+                    logger.info(f"  {entry['name']}: loaded Stage 1 complex ({len(coords)} atoms)")
+                except Exception as e:
+                    logger.warning(f"  {entry['name']}: failed to load Stage 1 complex: {e}")
+
     if pairs_to_run:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for m_name, m_smiles, s_name, eps in pairs_to_run:
-                # Get best direction: from Stage1, or run xTB surface scan
-                if m_name in direction_map:
-                    best_dir = direction_map[m_name]
-                else:
-                    logger.info(f"  {m_name}: no Stage1 direction, running xTB scan...")
-                    best_dir = get_best_direction(template_smiles, m_smiles)
+                # Use prebuilt complex from Stage 1 if available
+                prebuilt = complex_mol_map.get(m_name)
+                if prebuilt is not None:
+                    logger.info(f"  {m_name}/{s_name}: using Stage 1 optimized complex")
 
                 fut = executor.submit(
                     compute_dft_binding,
                     m_name, m_smiles, template_smiles, s_name, eps,
-                    best_dir, output_dir,
+                    "+x", output_dir,  # direction ignored when prebuilt is provided
+                    prebuilt,
                 )
                 futures[fut] = (m_name, s_name)
 

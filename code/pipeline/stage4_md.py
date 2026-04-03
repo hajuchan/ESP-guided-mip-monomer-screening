@@ -74,19 +74,50 @@ def create_system(template_smiles: str, monomer_smiles: str, monomer_name: str,
     template_off = OFFMolecule.from_rdkit(template_rd, allow_undefined_stereo=True)
     monomer_off = OFFMolecule.from_rdkit(monomer_rd, allow_undefined_stereo=True)
 
-    # Try GAFF2, fallback to OpenFF Sage
+    # Try GAFF2 → OpenFF Sage → gasteiger fallback
+    generator = None
     try:
         generator = GAFFTemplateGenerator(
             molecules=[template_off, monomer_off],
             forcefield="gaff-2.11",
         )
         logger.info(f"Using GAFF2 for {monomer_name}")
-    except Exception as e:
-        logger.warning(f"GAFF2 failed for {monomer_name}: {e}. Using OpenFF Sage 2.1.0")
-        generator = SMIRNOFFTemplateGenerator(
-            molecules=[template_off, monomer_off],
-            forcefield="openff-2.1.0",
-        )
+    except Exception as e1:
+        logger.warning(f"GAFF2 failed for {monomer_name}: {e1}")
+        try:
+            generator = SMIRNOFFTemplateGenerator(
+                molecules=[template_off, monomer_off],
+                forcefield="openff-2.1.0",
+            )
+            logger.info(f"Using OpenFF Sage 2.1.0 for {monomer_name}")
+        except Exception as e2:
+            logger.warning(f"OpenFF Sage failed for {monomer_name}: {e2}")
+            # Last resort: assign gasteiger charges manually, then retry GAFF2
+            try:
+                from rdkit.Chem import AllChem as _AllChem
+                _AllChem.ComputeGasteigerCharges(template_rd)
+                _AllChem.ComputeGasteigerCharges(monomer_rd)
+                template_off = OFFMolecule.from_rdkit(template_rd, allow_undefined_stereo=True)
+                monomer_off = OFFMolecule.from_rdkit(monomer_rd, allow_undefined_stereo=True)
+                # Assign gasteiger charges to OpenFF molecules
+                from openff.units import unit as offunit
+                import numpy as _np
+                for off_mol, rd_mol in [(template_off, template_rd), (monomer_off, monomer_rd)]:
+                    charges = [float(rd_mol.GetAtomWithIdx(i).GetDoubleProp('_GasteigerCharge'))
+                               for i in range(rd_mol.GetNumAtoms())]
+                    # Replace NaN with 0
+                    charges = [0.0 if _np.isnan(c) else c for c in charges]
+                    off_mol.partial_charges = _np.array(charges) * offunit.elementary_charge
+                generator = SMIRNOFFTemplateGenerator(
+                    molecules=[template_off, monomer_off],
+                    forcefield="openff-2.1.0",
+                )
+                logger.info(f"Using OpenFF Sage + Gasteiger charges for {monomer_name}")
+            except Exception as e3:
+                raise RuntimeError(
+                    f"All force field methods failed for {monomer_name}: "
+                    f"GAFF2={e1}, OpenFF={e2}, Gasteiger={e3}"
+                )
 
     # Build forcefield with TIP3P water
     forcefield = app.ForceField("tip3p.xml")
@@ -251,7 +282,9 @@ def analyze_trajectory(monomer_name: str, traj_file: str, pdb_file: str,
     r_cutoff = 0.35  # nm
     mask = r <= r_cutoff
     dr = r[1] - r[0] if len(r) > 1 else 0.01
-    ebn = np.trapz(g_r[mask] * r[mask] ** 2, r[mask]) * 4 * np.pi
+    # numpy 2.0+: trapz renamed to trapezoid
+    _trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
+    ebn = _trapz(g_r[mask] * r[mask] ** 2, r[mask]) * 4 * np.pi
 
     # ── Hydrogen Bond Analysis ────────────────────────────────────────
     # Baker-Hubbard criterion

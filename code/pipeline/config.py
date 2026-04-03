@@ -35,13 +35,11 @@ INTERFERENT_LIBRARY = {
 # ── Solvents (name → dielectric constant ε) ─────────────────────────
 # Values from PySCF ddCOSMO / standard references  [Lipparini2013]
 SOLVENTS = {
-    "Chloroform":   4.71,
     "Acetonitrile": 35.69,
-    "MeOH":         32.61,
 }
 
 # ── Pipeline Parameters ─────────────────────────────────────────────
-STAGE1_TOP_N = 7      # Number of monomers passed from xTB screening
+STAGE1_TOP_N = 7       # Number of monomers passed from xTB screening
 STAGE3_TOP_N = 3       # Number of monomers sent to MD verification
 N_WORKERS    = 16      # CPU parallel processes
 N_GPU_WORKERS = 2      # GPU parallel processes (limited by VRAM)

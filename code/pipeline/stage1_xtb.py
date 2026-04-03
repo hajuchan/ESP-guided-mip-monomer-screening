@@ -497,17 +497,52 @@ def _vina_dock(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
             m_pdbqt = f"{td}/monomer.pdbqt"
 
             # Use meeko for PDBQT preparation
+            # meeko 0.7+: prepare() returns list of MoleculeSetup objects
+            # Default merge: nonpolar H merged into parent (standard for Vina)
             preparator = MoleculePreparation()
 
-            preparator.prepare(template_mol)
-            pdbqt_str = PDBQTWriterLegacy.write_string(preparator)[0]
+            mol_setups = preparator.prepare(template_mol)
+            pdbqt_str = PDBQTWriterLegacy.write_string(mol_setups[0])[0]
+            # Vina receptor format: strip ROOT/BRANCH/END tags (rigid receptor)
+            receptor_lines = [l for l in pdbqt_str.splitlines()
+                              if not l.startswith(("ROOT", "ENDROOT", "BRANCH",
+                                                   "ENDBRANCH", "TORSDOF"))]
             with open(t_pdbqt, "w") as f:
-                f.write(pdbqt_str)
+                f.write("\n".join(receptor_lines) + "\n")
 
-            preparator.prepare(monomer_mol)
-            pdbqt_str = PDBQTWriterLegacy.write_string(preparator)[0]
+            mol_setups_m = preparator.prepare(monomer_mol)
+            pdbqt_str_m = PDBQTWriterLegacy.write_string(mol_setups_m[0])[0]
             with open(m_pdbqt, "w") as f:
-                f.write(pdbqt_str)
+                f.write(pdbqt_str_m)
+
+            # Parse PDBQT→RDKit index mapping from REMARK lines
+            # REMARK SMILES IDX: "rdkit_idx pdbqt_pos" pairs (heavy atoms)
+            # REMARK H PARENT: "parent_pdbqt_pos h_pdbqt_pos" (polar H)
+            pdbqt_to_rdkit = {}
+            h_parent_map = {}  # pdbqt_h_pos → pdbqt_parent_pos
+            for line in pdbqt_str_m.splitlines():
+                if line.startswith("REMARK SMILES IDX"):
+                    tokens = line.split()[3:]
+                    for j in range(0, len(tokens), 2):
+                        rdkit_idx = int(tokens[j]) - 1  # 1-based → 0-based
+                        pdbqt_pos = int(tokens[j + 1]) - 1
+                        pdbqt_to_rdkit[pdbqt_pos] = rdkit_idx
+                elif line.startswith("REMARK H PARENT"):
+                    tokens = line.split()[3:]
+                    for j in range(0, len(tokens), 2):
+                        parent_pos = int(tokens[j]) - 1
+                        h_pos = int(tokens[j + 1]) - 1
+                        h_parent_map[h_pos] = parent_pos
+
+            # Map polar H to RDKit: find H bonded to the parent atom
+            for h_pdbqt, parent_pdbqt in h_parent_map.items():
+                parent_rdkit = pdbqt_to_rdkit.get(parent_pdbqt)
+                if parent_rdkit is not None:
+                    parent_atom = monomer_mol.GetAtomWithIdx(parent_rdkit)
+                    for neighbor in parent_atom.GetNeighbors():
+                        if neighbor.GetAtomicNum() == 1 and neighbor.GetIdx() not in pdbqt_to_rdkit.values():
+                            pdbqt_to_rdkit[h_pdbqt] = neighbor.GetIdx()
+                            break
 
             # Run Vina
             v = Vina(sf_name="vina", verbosity=0)
@@ -517,17 +552,45 @@ def _vina_dock(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
                                 box_size=box_size.tolist())
             v.dock(exhaustiveness=64, n_poses=n_poses)
 
-            # Extract poses
+            # Extract poses: map Vina heavy+polar-H coords back to full RDKit mol
+            energies = v.energies(n_poses=n_poses)
+            all_coords = v.poses(n_poses=n_poses, coordinates_only=True)
+
+            from rdkit.Geometry import Point3D
+
             poses = []
-            energies = v.energies()
-            for i in range(min(n_poses, len(energies))):
-                v.set_pose(i)
-                coords = v.coordinates()  # monomer coordinates
+            for i in range(len(energies)):
+                vina_coords = all_coords[i]  # (n_pdbqt_atoms, 3)
+
+                if len(vina_coords) != len(pdbqt_to_rdkit):
+                    continue  # unexpected size
+
+                # Copy monomer mol and update mapped atom positions
+                m_copy = Chem.RWMol(monomer_mol)
+                conf = m_copy.GetConformer()
+                for pdbqt_pos, rdkit_idx in pdbqt_to_rdkit.items():
+                    x, y, z = vina_coords[pdbqt_pos]
+                    conf.SetAtomPosition(rdkit_idx, Point3D(float(x), float(y), float(z)))
+
+                # Re-optimize H positions (heavy atoms already placed by Vina)
+                try:
+                    from rdkit.Chem import AllChem as _AC
+                    ff = _AC.MMFFGetMoleculeForceField(m_copy)
+                    if ff is not None:
+                        # Fix mapped atoms, only optimize unmapped H
+                        for rdkit_idx in pdbqt_to_rdkit.values():
+                            ff.AddFixedPoint(rdkit_idx)
+                        ff.Minimize(maxIts=50)
+                except Exception:
+                    pass  # H positions stay at original relative positions
+
+                _, m_pos_new = mol_to_arrays(m_copy)
                 c_num = np.concatenate([t_num, m_num])
-                c_pos = np.concatenate([t_pos, coords])
+                c_pos = np.concatenate([t_pos, m_pos_new])
                 poses.append((c_num, c_pos))
 
-            logger.info(f"    Vina: {len(poses)} poses, best={energies[0][0]:+.1f} kcal/mol")
+            if energies is not None and len(energies) > 0:
+                logger.info(f"    Vina: {len(poses)} poses, best={energies[0][0]:+.1f} kcal/mol")
             return poses
 
     except Exception as e:
@@ -709,6 +772,17 @@ def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
     logger.info(f"  [{monomer_name}] Optimized → dE={de:+.3f} kcal/mol, "
                 f"site: atom {site['atom_idx']} ({site['symbol']}, {site['type']})")
 
+    # Save optimized complex coordinates for Stage 2 DFT handoff
+    # (RDKit Mol is not JSON-serializable, so store as atom list)
+    complex_mol = opt_result["best_complex_mol"]
+    complex_coords = []
+    if complex_mol is not None:
+        conf = complex_mol.GetConformer()
+        for i in range(complex_mol.GetNumAtoms()):
+            sym = complex_mol.GetAtomWithIdx(i).GetSymbol()
+            pos = conf.GetAtomPosition(i)
+            complex_coords.append([sym, round(pos.x, 6), round(pos.y, 6), round(pos.z, 6)])
+
     return {
         "name": monomer_name,
         "dE_hartree": opt_result["best_energy_hartree"],
@@ -721,6 +795,7 @@ def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
         "n_top_optimized": len(top),
         "best_direction": f"site_{site['atom_idx']}_{site['type']}",
         "binding_site": site,
+        "complex_coords": complex_coords,
     }
 
 

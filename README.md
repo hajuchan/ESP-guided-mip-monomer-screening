@@ -1033,7 +1033,7 @@ Spearman ρ = +0.257은 높지 않다. OPD가 실험 1위이지만 계산 3위�
 모든 설정은 `code/pipeline/config.py`에서 변경한다. Template SMILES, monomer 목록, 범함수, 기저, 용매를 수정한 뒤 아래 명령을 실행하면 된다.
 
 ```bash
-cd "/home/chan/Research/MIP simulation"
+cd MIP_simulation
 conda activate MIPscreen
 
 # 전체 파이프라인 (Stage 1→2→3→4)

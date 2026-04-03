@@ -4,7 +4,7 @@ MIP Pipeline Validation — 프로젝트 루트 실행 파일
 =================================================
 사용법:
     conda activate MIPscreen
-    cd "MIP simulation"
+    cd MIP_simulation
 
     # 전체 계산 + 검증 (처음 실행 시)
     python run_validation.py --all-compute --stage all

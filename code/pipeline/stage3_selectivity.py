@@ -266,16 +266,12 @@ def run_stage3(template_smiles: str = None,
     logger.info(f"Stage 3: Selectivity for {len(monomer_names)} monomers, "
                 f"{len(interferent_library)} interferents")
 
-    # Compute interferent binding energies (or load cache)
-    interf_cache = out_path / "stage3_interferent_dft.json"
-    if interf_cache.exists():
-        logger.info("Loading cached interferent DFT results")
-        with open(interf_cache) as f:
-            interferent_dft = json.load(f)
-    else:
-        interferent_dft = compute_interferent_binding(
-            template_smiles, monomer_names, monomer_library,
-            interferent_library, solvents, output_dir
+    # Compute interferent binding energies (with skip logic for completed pairs)
+    # Always call compute_interferent_binding — it loads cache internally
+    # and only computes missing pairs
+    interferent_dft = compute_interferent_binding(
+        template_smiles, monomer_names, monomer_library,
+        interferent_library, solvents, output_dir
         )
 
     # Compute selectivity
