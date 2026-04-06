@@ -584,3 +584,323 @@ PDBQT parsing error: Atom type B is not a valid AutoDock type (atom types are ca
 2026-04-03 14:03:31,796 [Pipeline]     Computing DFT charges for ESP-guided docking...
 2026-04-03 14:03:31,807 [Pipeline]     Computing DFT charges for ESP-guided docking...
 2026-04-03 14:03:31,809 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:38,589 [Pipeline] Template SMILES: CCCCCC=O
+2026-04-03 14:15:38,589 [Pipeline] Output directory: /home/mw/ESP-guided-mip-monomer-screening/results
+2026-04-03 14:15:38,589 [Pipeline] 
+==================== STAGE 1 ====================
+2026-04-03 14:15:38,866 [Pipeline] Stage 1: Screening 11 monomers (mode=quantumdock)
+2026-04-03 14:15:38,918 [Pipeline]   11 monomers to compute
+2026-04-03 14:15:39,435 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,435 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,435 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,435 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,435 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,437 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,437 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,438 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,438 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,438 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:15:39,439 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:22:08,941 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:22:08,942 [Pipeline]   [PYR] 137 ESP + 0 Vina = 137 total orientations
+2026-04-03 14:22:18,595 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:22:18,595 [Pipeline]   [AA] 134 ESP + 0 Vina = 134 total orientations
+2026-04-03 14:22:37,882 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:22:37,882 [Pipeline]   [ACM] 152 ESP + 0 Vina = 152 total orientations
+2026-04-03 14:22:56,677 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:22:56,683 [Pipeline]   [MAA] 122 ESP + 0 Vina = 122 total orientations
+2026-04-03 14:23:12,154 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:23:12,154 [Pipeline]   [MAAD] 118 ESP + 0 Vina = 118 total orientations
+2026-04-03 14:23:36,331 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:23:36,347 [Pipeline]   [4VP] 110 ESP + 0 Vina = 110 total orientations
+2026-04-03 14:23:40,751 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:23:40,751 [Pipeline]   [Styrene] 121 ESP + 0 Vina = 121 total orientations
+2026-04-03 14:23:42,447 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:23:42,467 [Pipeline]   [OPD] 104 ESP + 0 Vina = 104 total orientations
+2026-04-03 14:23:50,722 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:23:50,723 [Pipeline]   [NVP] 122 ESP + 0 Vina = 122 total orientations
+2026-04-03 14:24:11,210 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:24:11,210 [Pipeline]   [APB] 126 ESP + 0 Vina = 126 total orientations
+2026-04-03 14:24:18,246 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 14:24:18,246 [Pipeline]   [4VB] 146 ESP + 0 Vina = 146 total orientations
+2026-04-03 14:32:03,575 [Pipeline] Template SMILES: CCCCCC=O
+2026-04-03 14:32:03,575 [Pipeline] Output directory: /home/mw/ESP-guided-mip-monomer-screening/results
+2026-04-03 14:32:03,575 [Pipeline] 
+==================== STAGE 1 ====================
+2026-04-03 14:32:03,678 [Pipeline] Stage 1: Screening 11 monomers (mode=quantumdock)
+2026-04-03 14:32:03,726 [Pipeline]   11 monomers to compute
+2026-04-03 14:32:04,004 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,008 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,013 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,015 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,015 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,017 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,020 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,026 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,030 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,035 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 14:32:04,046 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 15:19:32,712 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 15:19:32,712 [Pipeline]   [AA] 134 ESP + 0 Vina = 134 total orientations
+2026-04-03 15:30:28,396 [Pipeline]   [AA] Phase 1 SP → top 10 (best: -3.426 kcal/mol)
+2026-04-03 15:30:28,402 [Pipeline]   [AA] Phase 2 refine: 61 orientations near top 3 sites
+2026-04-03 15:35:24,311 [Pipeline]   [AA] After merge: best=-3.426
+2026-04-03 15:35:40,898 [Pipeline]     E_template=-23.013502, E_monomer=-16.562813 Ha
+2026-04-03 15:37:23,367 [Pipeline]   [AA] Optimized → dE=-3.414 kcal/mol, site: atom 6 (O, acceptor)
+2026-04-03 15:37:23,378 [Pipeline]           AA: dE = -3.414 kcal/mol
+2026-04-03 16:14:41,482 [Pipeline] Template SMILES: CCCCCC=O
+2026-04-03 16:14:41,482 [Pipeline] Output directory: /home/mw/ESP-guided-mip-monomer-screening/results
+2026-04-03 16:14:41,482 [Pipeline] 
+==================== STAGE 1 ====================
+2026-04-03 16:14:41,691 [Pipeline] Stage 1: Screening 11 monomers (mode=quantumdock)
+2026-04-03 16:14:41,745 [Pipeline]   1 monomers already computed, skipping
+2026-04-03 16:14:41,746 [Pipeline]   10 monomers to compute
+2026-04-03 16:14:42,083 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,083 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,083 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,084 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,091 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,092 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,093 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,094 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,097 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:14:42,108 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 16:22:36,926 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 16:22:36,926 [Pipeline]   [MAA] 122 ESP + 0 Vina = 122 total orientations
+2026-04-03 16:22:37,572 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 16:22:37,572 [Pipeline]   [PYR] 137 ESP + 0 Vina = 137 total orientations
+2026-04-03 16:23:01,946 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 16:23:01,947 [Pipeline]   [MAAD] 118 ESP + 0 Vina = 118 total orientations
+2026-04-03 16:24:03,073 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 16:24:03,078 [Pipeline]   [OPD] 104 ESP + 0 Vina = 104 total orientations
+2026-04-03 16:25:12,726 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 16:25:12,726 [Pipeline]   [APB] 126 ESP + 0 Vina = 126 total orientations
+2026-04-03 16:26:05,737 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 16:26:05,737 [Pipeline]   [4VB] 146 ESP + 0 Vina = 146 total orientations
+2026-04-03 17:11:20,030 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 17:11:20,036 [Pipeline]   [ACM] 152 ESP + 0 Vina = 152 total orientations
+2026-04-03 17:11:53,927 [Pipeline]   [OPD] Phase 1 SP → top 10 (best: -3.493 kcal/mol)
+2026-04-03 17:11:53,938 [Pipeline]   [OPD] Phase 2 refine: 44 orientations near top 3 sites
+2026-04-03 17:13:28,678 [Pipeline]   [MAA] Phase 1 SP → top 10 (best: -3.079 kcal/mol)
+2026-04-03 17:13:28,704 [Pipeline]   [MAA] Phase 2 refine: 48 orientations near top 3 sites
+2026-04-03 17:15:29,853 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 17:15:29,853 [Pipeline]   [NVP] 122 ESP + 0 Vina = 122 total orientations
+2026-04-03 17:16:25,130 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 17:16:25,130 [Pipeline]   [4VP] 110 ESP + 0 Vina = 110 total orientations
+2026-04-03 17:16:32,554 [Pipeline]     Vina/meeko not installed, skipping Vina docking
+2026-04-03 17:16:32,560 [Pipeline]   [Styrene] 121 ESP + 0 Vina = 121 total orientations
+2026-04-03 17:18:34,235 [Pipeline]   [PYR] Phase 1 SP → top 10 (best: -2.655 kcal/mol)
+2026-04-03 17:18:34,271 [Pipeline]   [PYR] Phase 2 refine: 63 orientations near top 3 sites
+2026-04-03 17:24:38,188 [Pipeline]   [MAAD] Phase 1 SP → top 10 (best: -1.301 kcal/mol)
+2026-04-03 17:24:38,216 [Pipeline]   [MAAD] Phase 2 refine: 64 orientations near top 3 sites
+2026-04-03 17:44:05,527 [Pipeline]   [OPD] After merge: best=-4.022
+2026-04-03 17:46:02,088 [Pipeline]     E_template=-23.013502, E_monomer=-22.747985 Ha
+2026-04-03 17:46:33,182 [Pipeline]   [MAA] After merge: best=-3.079
+2026-04-03 17:48:22,594 [Pipeline]     E_template=-23.013502, E_monomer=-19.733292 Ha
+2026-04-03 17:49:06,114 [Pipeline]   [APB] Phase 1 SP → top 10 (best: -4.049 kcal/mol)
+2026-04-03 17:49:06,147 [Pipeline]   [APB] Phase 2 refine: 54 orientations near top 3 sites
+2026-04-03 17:57:03,116 [Pipeline]   [PYR] After merge: best=-2.655
+2026-04-03 17:58:39,349 [Pipeline]     E_template=-23.013502, E_monomer=-14.016821 Ha
+2026-04-03 18:04:31,671 [Pipeline]   [MAA] Optimized → dE=-3.200 kcal/mol, site: atom 13 (H, vdW/electrostatic)
+2026-04-03 18:04:31,772 [Pipeline]          MAA: dE = -3.200 kcal/mol
+2026-04-03 18:05:36,351 [Pipeline]   [OPD] Optimized → dE=-3.617 kcal/mol, site: atom 17 (H, vdW/electrostatic)
+2026-04-03 18:05:36,395 [Pipeline]          OPD: dE = -3.617 kcal/mol
+2026-04-03 18:12:06,603 [Pipeline]   [PYR] Optimized → dE=-2.526 kcal/mol, site: atom 11 (H, vdW/electrostatic)
+2026-04-03 18:12:06,615 [Pipeline]          PYR: dE = -2.526 kcal/mol
+2026-04-03 18:13:32,274 [Pipeline]   [MAAD] After merge: best=-4.346
+2026-04-03 18:14:59,021 [Pipeline]     E_template=-23.013502, E_monomer=-19.092718 Ha
+2026-04-03 18:18:38,834 [Pipeline]   [4VB] Phase 1 SP → top 10 (best: -3.973 kcal/mol)
+2026-04-03 18:18:38,858 [Pipeline]   [4VB] Phase 2 refine: 72 orientations near top 3 sites
+2026-04-03 18:28:36,472 [Pipeline]   [APB] After merge: best=-4.049
+2026-04-03 18:28:46,794 [Pipeline]   [MAAD] Optimized → dE=-4.235 kcal/mol, site: atom 14 (H, vdW/electrostatic)
+2026-04-03 18:28:46,815 [Pipeline]         MAAD: dE = -4.235 kcal/mol
+2026-04-03 18:30:19,327 [Pipeline]     E_template=-23.013502, E_monomer=-29.250758 Ha
+2026-04-03 18:30:37,530 [Pipeline]   [4VP] Phase 1 SP → top 10 (best: -3.358 kcal/mol)
+2026-04-03 18:30:37,550 [Pipeline]   [4VP] Phase 2 refine: 59 orientations near top 3 sites
+2026-04-03 18:33:40,175 [Pipeline]   [Styrene] Phase 1 SP → top 10 (best: -3.055 kcal/mol)
+2026-04-03 18:33:40,186 [Pipeline]   [Styrene] Phase 2 refine: 55 orientations near top 3 sites
+2026-04-03 18:36:44,681 [Pipeline]   [ACM] Phase 1 SP → top 10 (best: -1.593 kcal/mol)
+2026-04-03 18:36:44,716 [Pipeline]   [ACM] Phase 2 refine: 53 orientations near top 3 sites
+2026-04-03 18:39:42,655 [Pipeline]   [NVP] Phase 1 SP → top 10 (best: -2.109 kcal/mol)
+2026-04-03 18:39:42,706 [Pipeline]   [NVP] Phase 2 refine: 53 orientations near top 3 sites
+2026-04-03 18:46:36,265 [Pipeline]   [APB] Optimized → dE=-3.495 kcal/mol, site: atom 16 (H, vdW/electrostatic)
+2026-04-03 18:46:36,292 [Pipeline]          APB: dE = -3.495 kcal/mol
+2026-04-03 18:55:41,450 [Pipeline]   [4VP] After merge: best=-3.358
+2026-04-03 18:55:42,398 [Pipeline]   [Styrene] After merge: best=-3.971
+2026-04-03 18:55:46,514 [Pipeline]   [ACM] After merge: best=-3.604
+2026-04-03 18:56:37,736 [Pipeline]     E_template=-23.013502, E_monomer=-21.157654 Ha
+2026-04-03 18:56:42,767 [Pipeline]     E_template=-23.013502, E_monomer=-21.429073 Ha
+2026-04-03 18:56:50,468 [Pipeline]     E_template=-23.013502, E_monomer=-15.923102 Ha
+2026-04-03 18:59:19,406 [Pipeline]   [4VB] After merge: best=-3.973
+2026-04-03 19:00:43,435 [Pipeline]     E_template=-23.013502, E_monomer=-31.086582 Ha
+2026-04-03 19:02:25,037 [Pipeline]   [NVP] After merge: best=-3.069
+2026-04-03 19:03:24,354 [Pipeline]     E_template=-23.013502, E_monomer=-24.428856 Ha
+2026-04-03 19:04:08,521 [Pipeline]   [ACM] Optimized → dE=-3.529 kcal/mol, site: atom 11 (H, vdW/electrostatic)
+2026-04-03 19:04:08,557 [Pipeline]          ACM: dE = -3.529 kcal/mol
+2026-04-03 19:05:24,904 [Pipeline]   [4VP] Optimized → dE=-3.186 kcal/mol, site: atom 6 (O, acceptor)
+2026-04-03 19:05:24,932 [Pipeline]          4VP: dE = -3.186 kcal/mol
+2026-04-03 19:05:25,844 [Pipeline]   [Styrene] Optimized → dE=-3.884 kcal/mol, site: atom 13 (H, vdW/electrostatic)
+2026-04-03 19:05:25,867 [Pipeline]      Styrene: dE = -3.884 kcal/mol
+2026-04-03 19:07:37,017 [Pipeline]   [4VB] Optimized → dE=-2.440 kcal/mol, site: atom 18 (H, vdW/electrostatic)
+2026-04-03 19:07:37,034 [Pipeline]          4VB: dE = -2.440 kcal/mol
+2026-04-03 19:07:41,981 [Pipeline]   [NVP] Optimized → dE=-2.980 kcal/mol, site: atom 7 (H, vdW/electrostatic)
+2026-04-03 19:07:41,985 [Pipeline]          NVP: dE = -2.980 kcal/mol
+2026-04-03 19:07:42,859 [Pipeline] Stage 1 complete. Top 7: ['MAAD', 'Styrene', 'OPD', 'ACM', 'APB', 'AA', 'MAA']
+2026-04-03 19:07:42,860 [Pipeline] Stage 1 completed in 10381.4s
+2026-04-03 19:07:42,861 [Pipeline] 
+==================== STAGE 2 ====================
+2026-04-03 19:07:42,874 [Pipeline] Stage 2: 7 to compute, 0 skipped (total 7, workers=1, GPU=True)
+2026-04-03 19:07:42,929 [Pipeline]   MAAD: loaded Stage 1 complex (32 atoms)
+2026-04-03 19:07:42,978 [Pipeline]   Styrene: loaded Stage 1 complex (35 atoms)
+2026-04-03 19:07:43,026 [Pipeline]   OPD: loaded Stage 1 complex (35 atoms)
+2026-04-03 19:07:43,059 [Pipeline]   ACM: loaded Stage 1 complex (29 atoms)
+2026-04-03 19:07:43,094 [Pipeline]   APB: loaded Stage 1 complex (37 atoms)
+2026-04-03 19:07:43,125 [Pipeline]   AA: loaded Stage 1 complex (28 atoms)
+2026-04-03 19:07:43,161 [Pipeline]   MAA: loaded Stage 1 complex (31 atoms)
+2026-04-03 19:07:43,162 [Pipeline]   MAAD/Acetonitrile: using Stage 1 optimized complex
+2026-04-03 19:07:43,167 [Pipeline]   Styrene/Acetonitrile: using Stage 1 optimized complex
+2026-04-03 19:07:43,168 [Pipeline]   OPD/Acetonitrile: using Stage 1 optimized complex
+2026-04-03 19:07:43,168 [Pipeline]   ACM/Acetonitrile: using Stage 1 optimized complex
+2026-04-03 19:07:43,169 [Pipeline]   APB/Acetonitrile: using Stage 1 optimized complex
+2026-04-03 19:07:43,169 [Pipeline]   AA/Acetonitrile: using Stage 1 optimized complex
+2026-04-03 19:07:43,170 [Pipeline]   MAA/Acetonitrile: using Stage 1 optimized complex
+2026-04-03 19:07:43,258 [Pipeline]     범함수 선택: wb97xd — H-bond 지배 (HBD=1+HBA=2=3)
+2026-04-03 19:07:43,258 [Pipeline]   GPU DFT optimization (wb97xd+PCM)...
+2026-04-03 19:16:46,913 [Pipeline]         MAAD/Acetonitrile   : raw=-0.947, bsse=-14.528 kcal/mol
+2026-04-03 22:10:21,320 [Pipeline]      Styrene/Acetonitrile   : raw=-5.151, bsse=-13.473 kcal/mol
+2026-04-03 22:30:25,678 [Pipeline]          OPD/Acetonitrile   : raw=-3.237, bsse=-14.750 kcal/mol
+2026-04-03 22:42:54,139 [Pipeline]          ACM/Acetonitrile   : raw=-2.576, bsse=-17.511 kcal/mol
+2026-04-03 23:06:42,856 [Pipeline]          APB/Acetonitrile   : raw=-43.296, bsse=-20.626 kcal/mol
+2026-04-03 23:17:09,915 [Pipeline]           AA/Acetonitrile   : raw=-5.881, bsse=-17.649 kcal/mol
+2026-04-03 23:27:09,316 [Pipeline]          MAA/Acetonitrile   : raw=-1.088, bsse=-11.438 kcal/mol
+2026-04-03 23:27:09,492 [Pipeline] Stage 2 complete. Results: /home/mw/ESP-guided-mip-monomer-screening/results/stage2/stage2_dft.json
+2026-04-03 23:27:09,493 [Pipeline] Stage 2 completed in 15566.6s
+2026-04-03 23:27:09,493 [Pipeline] 
+==================== STAGE 3 ====================
+2026-04-03 23:27:09,615 [Pipeline] NumExpr defaulting to 16 threads.
+2026-04-03 23:27:10,033 [Pipeline] Stage 3: Selectivity for 7 monomers, 3 interferents
+2026-04-03 23:27:10,033 [Pipeline] Computing 21 interferent-monomer DFT jobs (0 skipped, 21 total)
+2026-04-03 23:27:10,198 [Pipeline]     Computing DFT charges for ESP-guided docking...
+2026-04-03 23:30:12,775 [Pipeline]     E_template=-14.458908, E_monomer=-19.092718 Ha
+2026-04-03 23:30:38,544 [Pipeline]     범함수 선택: wb97xd — H-bond 지배 (HBD=2+HBA=2=4)
+2026-04-03 23:30:38,545 [Pipeline]   GPU DFT optimization (wb97xd+PCM)...
+2026-04-06 11:15:29,062 [Pipeline] Template SMILES: CCCCCC=O
+2026-04-06 11:15:29,062 [Pipeline] Output directory: /home/chan/Research/MIP_simulation/results
+2026-04-06 11:15:29,062 [Pipeline] 
+==================== STAGE 1 ====================
+2026-04-06 11:15:29,740 [Pipeline] Stage 1: Screening 11 monomers (mode=quantumdock)
+2026-04-06 11:15:29,807 [Pipeline]   11 monomers already computed, skipping
+2026-04-06 11:15:29,807 [Pipeline]   0 monomers to compute
+2026-04-06 11:15:29,813 [Pipeline] Stage 1 complete. Top 7: ['MAAD', 'Styrene', 'OPD', 'ACM', 'APB', 'AA', 'MAA']
+2026-04-06 11:15:29,813 [Pipeline] Stage 1 completed in 0.8s
+2026-04-06 11:15:29,814 [Pipeline] 
+==================== STAGE 2 ====================
+2026-04-06 11:15:29,814 [Pipeline]   MAAD/Acetonitrile: already computed, skipping
+2026-04-06 11:15:29,815 [Pipeline]   Styrene/Acetonitrile: already computed, skipping
+2026-04-06 11:15:29,815 [Pipeline]   OPD/Acetonitrile: already computed, skipping
+2026-04-06 11:15:29,815 [Pipeline]   ACM/Acetonitrile: already computed, skipping
+2026-04-06 11:15:29,815 [Pipeline]   APB/Acetonitrile: already computed, skipping
+2026-04-06 11:15:29,815 [Pipeline]   AA/Acetonitrile: already computed, skipping
+2026-04-06 11:15:29,815 [Pipeline]   MAA/Acetonitrile: already computed, skipping
+2026-04-06 11:15:29,815 [Pipeline] Stage 2: 0 to compute, 7 skipped (total 7, workers=1, GPU=True)
+2026-04-06 11:15:29,872 [Pipeline]   MAAD: loaded Stage 1 complex (32 atoms)
+2026-04-06 11:15:29,932 [Pipeline]   Styrene: loaded Stage 1 complex (35 atoms)
+2026-04-06 11:15:29,996 [Pipeline]   OPD: loaded Stage 1 complex (35 atoms)
+2026-04-06 11:15:30,034 [Pipeline]   ACM: loaded Stage 1 complex (29 atoms)
+2026-04-06 11:15:30,073 [Pipeline]   APB: loaded Stage 1 complex (37 atoms)
+2026-04-06 11:15:30,109 [Pipeline]   AA: loaded Stage 1 complex (28 atoms)
+2026-04-06 11:15:30,153 [Pipeline]   MAA: loaded Stage 1 complex (31 atoms)
+2026-04-06 11:15:30,153 [Pipeline] Stage 2 complete. Results: /home/chan/Research/MIP_simulation/results/stage2/stage2_dft.json
+2026-04-06 11:15:30,154 [Pipeline] Stage 2 completed in 0.3s
+2026-04-06 11:15:30,154 [Pipeline] 
+==================== STAGE 3 ====================
+2026-04-06 11:15:30,461 [Pipeline] NumExpr defaulting to 12 threads.
+2026-04-06 11:15:31,670 [Pipeline] Stage 3: Selectivity for 7 monomers, 3 interferents
+2026-04-06 11:15:31,670 [Pipeline] Computing 0 interferent-monomer DFT jobs (21 skipped, 21 total)
+2026-04-06 11:15:31,671 [Pipeline] [Solvent strategy: synthesis_match → Acetonitrile]
+2026-04-06 11:15:31,671 [Pipeline]   MAAD: Acetonitrile bsse_dE = -14.528 kcal/mol
+2026-04-06 11:15:31,671 [Pipeline]   Styrene: Acetonitrile bsse_dE = -13.473 kcal/mol
+2026-04-06 11:15:31,671 [Pipeline]   OPD: Acetonitrile bsse_dE = -14.750 kcal/mol
+2026-04-06 11:15:31,671 [Pipeline]   ACM: Acetonitrile bsse_dE = -17.511 kcal/mol
+2026-04-06 11:15:31,671 [Pipeline]   APB: Acetonitrile bsse_dE = -20.626 kcal/mol
+2026-04-06 11:15:31,671 [Pipeline]   AA: Acetonitrile bsse_dE = -17.649 kcal/mol
+2026-04-06 11:15:31,672 [Pipeline]   MAA: Acetonitrile bsse_dE = -11.438 kcal/mol
+2026-04-06 11:15:31,690 [Pipeline] Results saved: /home/chan/Research/MIP_simulation/results/stage3/stage3_selectivity.csv
+2026-04-06 11:15:31,950 [Pipeline] Saved scatter plot: /home/chan/Research/MIP_simulation/results/stage3/stage3_scatter.png
+2026-04-06 11:15:32,104 [Pipeline] Saved bar chart: /home/chan/Research/MIP_simulation/results/stage3/stage3_bar.png
+2026-04-06 11:15:32,105 [Pipeline] Selectivity ranking:
+2026-04-06 11:15:32,105 [Pipeline]   1.        MAA: avg_log(S) = +6.732 <<<
+2026-04-06 11:15:32,105 [Pipeline]   2.       MAAD: avg_log(S) = +4.634 <<<
+2026-04-06 11:15:32,105 [Pipeline]   3.        OPD: avg_log(S) = +1.405 <<<
+2026-04-06 11:15:32,105 [Pipeline]   4.         AA: avg_log(S) = +0.624
+2026-04-06 11:15:32,105 [Pipeline]   5.        APB: avg_log(S) = -1.936
+2026-04-06 11:15:32,105 [Pipeline]   6.        ACM: avg_log(S) = -2.863
+2026-04-06 11:15:32,105 [Pipeline]   7.    Styrene: avg_log(S) = -4.640
+2026-04-06 11:15:32,105 [Pipeline] Stage 3 completed in 2.0s
+2026-04-06 11:15:32,105 [Pipeline] 
+==================== STAGE 4 ====================
+2026-04-06 11:15:32,109 [Pipeline] Stage 4: MD validation for ['MAA', 'MAAD', 'OPD']
+2026-04-06 11:15:32,109 [Pipeline]   3 monomers already computed, skipping
+2026-04-06 11:15:32,111 [Pipeline]   MAA: already computed, skipping
+2026-04-06 11:15:32,111 [Pipeline]   MAAD: already computed, skipping
+2026-04-06 11:15:32,111 [Pipeline]   OPD: already computed, skipping
+2026-04-06 11:15:50,330 [Pipeline] Template SMILES: CCCCCC=O
+2026-04-06 11:15:50,330 [Pipeline] Output directory: /home/chan/Research/MIP_simulation/results
+2026-04-06 11:15:50,330 [Pipeline] 
+==================== STAGE 1 ====================
+2026-04-06 11:15:50,465 [Pipeline] Stage 1: Screening 11 monomers (mode=quantumdock)
+2026-04-06 11:15:50,516 [Pipeline]   11 monomers already computed, skipping
+2026-04-06 11:15:50,516 [Pipeline]   0 monomers to compute
+2026-04-06 11:15:50,522 [Pipeline] Stage 1 complete. Top 7: ['MAAD', 'Styrene', 'OPD', 'ACM', 'APB', 'AA', 'MAA']
+2026-04-06 11:15:50,522 [Pipeline] Stage 1 completed in 0.2s
+2026-04-06 11:15:50,522 [Pipeline] 
+==================== STAGE 2 ====================
+2026-04-06 11:15:50,523 [Pipeline]   MAAD/Acetonitrile: already computed, skipping
+2026-04-06 11:15:50,523 [Pipeline]   Styrene/Acetonitrile: already computed, skipping
+2026-04-06 11:15:50,523 [Pipeline]   OPD/Acetonitrile: already computed, skipping
+2026-04-06 11:15:50,523 [Pipeline]   ACM/Acetonitrile: already computed, skipping
+2026-04-06 11:15:50,523 [Pipeline]   APB/Acetonitrile: already computed, skipping
+2026-04-06 11:15:50,523 [Pipeline]   AA/Acetonitrile: already computed, skipping
+2026-04-06 11:15:50,523 [Pipeline]   MAA/Acetonitrile: already computed, skipping
+2026-04-06 11:15:50,523 [Pipeline] Stage 2: 0 to compute, 7 skipped (total 7, workers=1, GPU=True)
+2026-04-06 11:15:50,567 [Pipeline]   MAAD: loaded Stage 1 complex (32 atoms)
+2026-04-06 11:15:50,625 [Pipeline]   Styrene: loaded Stage 1 complex (35 atoms)
+2026-04-06 11:15:50,684 [Pipeline]   OPD: loaded Stage 1 complex (35 atoms)
+2026-04-06 11:15:50,724 [Pipeline]   ACM: loaded Stage 1 complex (29 atoms)
+2026-04-06 11:15:50,762 [Pipeline]   APB: loaded Stage 1 complex (37 atoms)
+2026-04-06 11:15:50,801 [Pipeline]   AA: loaded Stage 1 complex (28 atoms)
+2026-04-06 11:15:50,841 [Pipeline]   MAA: loaded Stage 1 complex (31 atoms)
+2026-04-06 11:15:50,842 [Pipeline] Stage 2 complete. Results: /home/chan/Research/MIP_simulation/results/stage2/stage2_dft.json
+2026-04-06 11:15:50,842 [Pipeline] Stage 2 completed in 0.3s
+2026-04-06 11:15:50,842 [Pipeline] 
+==================== STAGE 3 ====================
+2026-04-06 11:15:50,904 [Pipeline] NumExpr defaulting to 12 threads.
+2026-04-06 11:15:51,248 [Pipeline] Stage 3: Selectivity for 7 monomers, 3 interferents
+2026-04-06 11:15:51,248 [Pipeline] Computing 0 interferent-monomer DFT jobs (21 skipped, 21 total)
+2026-04-06 11:15:51,249 [Pipeline] [Solvent strategy: synthesis_match → Acetonitrile]
+2026-04-06 11:15:51,249 [Pipeline]   MAAD: Acetonitrile bsse_dE = -14.528 kcal/mol
+2026-04-06 11:15:51,249 [Pipeline]   Styrene: Acetonitrile bsse_dE = -13.473 kcal/mol
+2026-04-06 11:15:51,249 [Pipeline]   OPD: Acetonitrile bsse_dE = -14.750 kcal/mol
+2026-04-06 11:15:51,249 [Pipeline]   ACM: Acetonitrile bsse_dE = -17.511 kcal/mol
+2026-04-06 11:15:51,249 [Pipeline]   APB: Acetonitrile bsse_dE = -20.626 kcal/mol
+2026-04-06 11:15:51,249 [Pipeline]   AA: Acetonitrile bsse_dE = -17.649 kcal/mol
+2026-04-06 11:15:51,249 [Pipeline]   MAA: Acetonitrile bsse_dE = -11.438 kcal/mol
+2026-04-06 11:15:51,251 [Pipeline] Results saved: /home/chan/Research/MIP_simulation/results/stage3/stage3_selectivity.csv
+2026-04-06 11:15:51,419 [Pipeline] Saved scatter plot: /home/chan/Research/MIP_simulation/results/stage3/stage3_scatter.png
+2026-04-06 11:15:51,514 [Pipeline] Saved bar chart: /home/chan/Research/MIP_simulation/results/stage3/stage3_bar.png
+2026-04-06 11:15:51,515 [Pipeline] Selectivity ranking:
+2026-04-06 11:15:51,515 [Pipeline]   1.        MAA: avg_log(S) = +6.732 <<<
+2026-04-06 11:15:51,515 [Pipeline]   2.       MAAD: avg_log(S) = +4.634 <<<
+2026-04-06 11:15:51,515 [Pipeline]   3.        OPD: avg_log(S) = +1.405 <<<
+2026-04-06 11:15:51,515 [Pipeline]   4.         AA: avg_log(S) = +0.624
+2026-04-06 11:15:51,515 [Pipeline]   5.        APB: avg_log(S) = -1.936
+2026-04-06 11:15:51,515 [Pipeline]   6.        ACM: avg_log(S) = -2.863
+2026-04-06 11:15:51,515 [Pipeline]   7.    Styrene: avg_log(S) = -4.640
+2026-04-06 11:15:51,515 [Pipeline] Stage 3 completed in 0.7s
+2026-04-06 11:15:51,515 [Pipeline] 
+==================== STAGE 4 ====================
+2026-04-06 11:15:51,515 [Pipeline] Stage 4: MD validation for ['MAA', 'MAAD', 'OPD']
+2026-04-06 11:15:51,516 [Pipeline]   3 monomers already computed, skipping
+2026-04-06 11:15:51,518 [Pipeline]   MAA: already computed, skipping
+2026-04-06 11:15:51,518 [Pipeline]   MAAD: already computed, skipping
+2026-04-06 11:15:51,518 [Pipeline]   OPD: already computed, skipping

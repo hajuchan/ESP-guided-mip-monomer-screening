@@ -1,0 +1,8 @@
+monomer,selected_solvent,solvent_strategy,bsse_dE_template,avg_log_S,n_interferents
+MAAD,Acetonitrile,synthesis_match,-14.528,4.634,3
+Styrene,Acetonitrile,synthesis_match,-13.473,-4.64,3
+OPD,Acetonitrile,synthesis_match,-14.75,1.405,3
+ACM,Acetonitrile,synthesis_match,-17.511,-2.863,3
+APB,Acetonitrile,synthesis_match,-20.626,-1.936,3
+AA,Acetonitrile,synthesis_match,-17.649,0.624,3
+MAA,Acetonitrile,synthesis_match,-11.438,6.732,3

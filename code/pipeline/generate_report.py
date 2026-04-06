@@ -165,7 +165,7 @@ def _build_stage1(out: pathlib.Path) -> str:
         for i, entry in enumerate(all_data, 1):
             if isinstance(entry, dict):
                 name = entry.get("monomer", entry.get("name", ""))
-                be = entry.get("binding_energy", entry.get("dE", ""))
+                be = entry.get("dE_kcal", entry.get("binding_energy", entry.get("dE", "")))
                 if isinstance(be, (int, float)):
                     be = f"{be:+.3f}"
                 rows.append([i, name, be])
@@ -192,7 +192,7 @@ def _build_stage1(out: pathlib.Path) -> str:
                 rows = []
                 for i, entry in enumerate(top_data, 1):
                     name = entry.get("monomer", entry.get("name", ""))
-                    be = entry.get("binding_energy", entry.get("dE", ""))
+                    be = entry.get("dE_kcal", entry.get("binding_energy", entry.get("dE", "")))
                     if isinstance(be, (int, float)):
                         be = f"{be:+.3f}"
                     rows.append([i, name, be])
@@ -222,7 +222,7 @@ def _build_stage2(out: pathlib.Path) -> str:
             row = [mono]
             for s in solvent_names:
                 v = solvs.get(s, {})
-                de = v.get("dE", "N/A")
+                de = v.get("raw_dE", v.get("dE", "N/A"))
                 row.append(f"{de:+.3f}" if isinstance(de, (int, float)) else str(de))
             for s in solvent_names:
                 v = solvs.get(s, {})
@@ -362,7 +362,7 @@ def _build_crosslinker(out: pathlib.Path) -> str:
         rows = []
         for name, val in cl_data.items():
             if isinstance(val, dict):
-                be = val.get("binding_energy", val.get("dE", "N/A"))
+                be = val.get("bsse_dE", val.get("raw_dE", val.get("binding_energy", val.get("dE", "N/A"))))
             else:
                 be = val
             if isinstance(be, (int, float)):
@@ -435,14 +435,14 @@ def _build_recommendations(out: pathlib.Path) -> str:
         best_be = float("inf")
         if isinstance(cl_data, list):
             for entry in cl_data:
-                be = entry.get("binding_energy", entry.get("dE", 0))
+                be = entry.get("dE_kcal", entry.get("binding_energy", entry.get("dE", 0)))
                 if isinstance(be, (int, float)) and be < best_be:
                     best_be = be
                     best_cl = entry.get("crosslinker", entry.get("name", ""))
         elif isinstance(cl_data, dict):
             for name, val in cl_data.items():
                 if isinstance(val, dict):
-                    be = val.get("binding_energy", val.get("dE", 0))
+                    be = val.get("bsse_dE", val.get("raw_dE", val.get("dE", 0)))
                 else:
                     be = val if isinstance(val, (int, float)) else 0
                 if be < best_be:

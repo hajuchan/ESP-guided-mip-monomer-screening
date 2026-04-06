@@ -1,0 +1,20 @@
+[
+  {
+    "monomer": "MAA",
+    "EBN": 0.02,
+    "n_hbonds_total": 4,
+    "n_hbonds_stable": 0
+  },
+  {
+    "monomer": "MAAD",
+    "EBN": 0.018,
+    "n_hbonds_total": 8,
+    "n_hbonds_stable": 0
+  },
+  {
+    "monomer": "OPD",
+    "EBN": 0.01,
+    "n_hbonds_total": 14,
+    "n_hbonds_stable": 0
+  }
+]
