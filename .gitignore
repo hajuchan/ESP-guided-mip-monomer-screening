@@ -1,2 +1,9 @@
 .vscode/
 .claude/
+
+# Large files (MD trajectories, model pickles)
+*.dcd
+*.pkl
+*.pdb
+__pycache__/
+*.pyc

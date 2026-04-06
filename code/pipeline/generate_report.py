@@ -409,13 +409,23 @@ def _build_recommendations(out: pathlib.Path) -> str:
     body_parts = ['<div class="recommend-box">']
 
     # --- TOP-3 monomers ---
-    # Try to determine the top monomers from available data
+    # Priority: Stage 3 selectivity > Stage 2 binding energy
     top_names = []
-    if isinstance(dft_data, dict):
+    stage3_top = _load_json(out / "stage3" / "stage3_top.json")
+    if stage3_top and isinstance(stage3_top, list):
+        top_names = stage3_top[:3]
+    elif csv_rows:
+        # Fallback: sort by avg_log_S from selectivity CSV
+        scored = [(r.get("monomer", ""), float(r.get("avg_log_S", 0)))
+                  for r in csv_rows if r.get("avg_log_S")]
+        scored.sort(key=lambda x: -x[1])  # higher log_S = more selective
+        top_names = [name for name, _ in scored[:3]]
+    elif isinstance(dft_data, dict):
+        # Last fallback: Stage 2 binding energy
         avg_be = {}
         for m, solvs in dft_data.items():
             if isinstance(solvs, dict):
-                energies = [v.get("bsse_dE", v.get("dE", 0))
+                energies = [v.get("bsse_dE", v.get("raw_dE", 0))
                             for v in solvs.values() if isinstance(v, dict)]
                 avg_be[m] = sum(energies) / len(energies) if energies else 0.0
         top_names = sorted(avg_be, key=avg_be.get)[:3]
