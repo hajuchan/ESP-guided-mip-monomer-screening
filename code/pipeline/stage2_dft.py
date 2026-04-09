@@ -628,101 +628,194 @@ def run_stage2(template_smiles: str = None,
 
 def generate_esp_map(atom_str: str, basis: str, eps: float,
                      label: str, output_dir: str):
-    """Generate ESP (Molecular Electrostatic Potential) map.
+    """Generate 3D ESP isosurface map (Singh 2012 style).
 
-    Saves a cube file and a 2D contour PNG.
+    Computes electron density and ESP on a 3D grid, then renders an
+    isosurface of the electron density colored by ESP values.
+    Saves interactive HTML (plotly) and static PNG.
+
     Ref: Singh 2012 — ESP maps for template-monomer interaction analysis.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import TwoSlopeNorm
-
     out_path = Path(output_dir)
 
     try:
-        from pyscf import gto, dft, solvent, lib, tools
+        from pyscf import gto, dft, tools
+        from pyscf.solvent import PCM
+        import plotly.graph_objects as go
 
         mol = gto.M(atom=atom_str, basis=basis, verbose=0)
         mf = dft.RKS(mol)
-        mf.xc = "b3lyp"
-        mf = solvent.ddCOSMO(mf)
+        mf.xc = DFT_FUNCTIONAL
+        mf = PCM(mf)
         mf.with_solvent.eps = eps
+        try:
+            mf = mf.to_gpu()
+        except Exception:
+            pass
         mf.kernel()
 
-        # Generate cube file for MEP
-        cube_path = str(out_path / f"stage2_esp_{label}.cube")
         dm = mf.make_rdm1()
-        tools.cubegen.mep(mol, cube_path, dm, nx=60, ny=60, nz=60)
+        if hasattr(dm, 'get'):
+            dm = dm.get()  # CuPy → NumPy
 
-        # Read cube and create 2D contour plot (xy plane at z-midpoint)
-        with open(cube_path) as f:
-            lines = f.readlines()
+        # Generate electron density cube
+        density_cube = str(out_path / f"_tmp_density_{label}.cube")
+        tools.cubegen.density(mol, density_cube, dm, nx=60, ny=60, nz=60)
 
-        n_atoms = abs(int(lines[2].split()[0]))
-        origin = [float(x) for x in lines[2].split()[1:4]]
-        nx = int(lines[3].split()[0])
-        ny = int(lines[4].split()[0])
-        nz = int(lines[5].split()[0])
-        dx = float(lines[3].split()[1])
-        dy = float(lines[4].split()[2])
-        dz = float(lines[5].split()[3])
+        # Generate ESP cube
+        esp_cube = str(out_path / f"stage2_esp_{label}.cube")
+        tools.cubegen.mep(mol, esp_cube, dm, nx=60, ny=60, nz=60)
 
-        # Read volumetric data
-        data_start = 6 + n_atoms
-        values = []
-        for line in lines[data_start:]:
-            values.extend([float(v) for v in line.split()])
-        data = np.array(values).reshape(nx, ny, nz)
+        # Parse both cubes
+        def _parse_cube(path):
+            with open(path) as f:
+                lines = f.readlines()
+            n_atoms = abs(int(lines[2].split()[0]))
+            origin = np.array([float(x) for x in lines[2].split()[1:4]])
+            nx = int(lines[3].split()[0])
+            ny = int(lines[4].split()[0])
+            nz = int(lines[5].split()[0])
+            axes = np.zeros((3, 3))
+            for i in range(3):
+                parts = lines[3 + i].split()
+                axes[i] = [float(parts[j]) for j in range(1, 4)]
+            # Atom positions
+            atoms = []
+            for i in range(n_atoms):
+                parts = lines[6 + i].split()
+                atoms.append({
+                    'Z': int(float(parts[0])),
+                    'pos': np.array([float(parts[2]), float(parts[3]), float(parts[4])])
+                })
+            # Volumetric data
+            data_start = 6 + n_atoms
+            values = []
+            for line in lines[data_start:]:
+                values.extend([float(v) for v in line.split()])
+            data = np.array(values).reshape(nx, ny, nz)
+            return data, origin, axes, nx, ny, nz, atoms
 
-        # Take z-midpoint slice
-        z_mid = nz // 2
-        slice_xy = data[:, :, z_mid]
+        rho, origin, axes, nx, ny, nz, atoms = _parse_cube(density_cube)
+        esp, _, _, _, _, _, _ = _parse_cube(esp_cube)
 
-        # Read atom positions for overlay
-        atom_xs, atom_ys = [], []
-        for i in range(n_atoms):
-            parts = lines[6 + i].split()
-            atom_xs.append(float(parts[2]))
-            atom_ys.append(float(parts[3]))
+        bohr2ang = 0.529177
 
-        # Convert to grid coordinates
-        bohr_to_ang = 0.529177
-        atom_xs_grid = [(x - origin[0]) / dx for x in atom_xs]
-        atom_ys_grid = [(y - origin[1]) / dy for y in atom_ys]
+        # Marching cubes to extract isosurface at rho = 0.02
+        from skimage.measure import marching_cubes
+        iso_val = 0.02
+        if rho.max() < iso_val:
+            iso_val = rho.max() * 0.3  # fallback for small molecules
 
-        # Plot
-        fig, ax = plt.subplots(figsize=(8, 7))
-        vmax = max(abs(slice_xy.min()), abs(slice_xy.max()))
-        vmax = min(vmax, 0.1)  # Clamp for visibility
-        norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
-        im = ax.contourf(slice_xy.T, levels=30, cmap="RdBu_r", norm=norm)
-        ax.scatter(atom_xs_grid, atom_ys_grid, c="black", s=30, zorder=5)
-        ax.set_title(f"ESP Map: {label}")
-        ax.set_xlabel("x (grid)")
-        ax.set_ylabel("y (grid)")
-        plt.colorbar(im, ax=ax, label="ESP (a.u.)")
-        fig.tight_layout()
+        verts, faces, _, _ = marching_cubes(rho, iso_val)
+
+        # Convert grid indices to Cartesian (Angstrom)
+        cart_verts = np.zeros_like(verts)
+        for i in range(3):
+            cart_verts[:, i] = (origin[i] + verts[:, 0] * axes[0, i]
+                                + verts[:, 1] * axes[1, i]
+                                + verts[:, 2] * axes[2, i]) * bohr2ang
+
+        # Interpolate ESP on isosurface vertices
+        from scipy.interpolate import RegularGridInterpolator
+        x_grid = np.arange(nx)
+        y_grid = np.arange(ny)
+        z_grid = np.arange(nz)
+        esp_interp = RegularGridInterpolator((x_grid, y_grid, z_grid), esp,
+                                             bounds_error=False, fill_value=0)
+        esp_on_surface = esp_interp(verts)
+
+        # Clamp ESP for color mapping
+        vmax = min(0.05, np.percentile(np.abs(esp_on_surface), 95))
+        esp_clamped = np.clip(esp_on_surface, -vmax, vmax)
+
+        # Atom spheres
+        elem_colors = {1: '#FFFFFF', 6: '#808080', 7: '#3050F8', 8: '#FF0D0D',
+                       5: '#FFB5B5', 17: '#1FF01F', 16: '#FFFF30'}
+        elem_radii = {1: 0.25, 6: 0.4, 7: 0.4, 8: 0.4, 5: 0.45, 17: 0.5, 16: 0.5}
+
+        # Build plotly figure
+        fig = go.Figure()
+
+        # ESP-colored isosurface
+        fig.add_trace(go.Mesh3d(
+            x=cart_verts[:, 0], y=cart_verts[:, 1], z=cart_verts[:, 2],
+            i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+            intensity=esp_clamped,
+            colorscale='RdBu_r',
+            cmin=-vmax, cmax=vmax,
+            opacity=0.7,
+            colorbar=dict(title='ESP (a.u.)', thickness=15),
+            name='ESP surface',
+        ))
+
+        # Atom spheres
+        for atom in atoms:
+            Z = atom['Z']
+            pos = atom['pos'] * bohr2ang
+            color = elem_colors.get(Z, '#FF00FF')
+            r = elem_radii.get(Z, 0.3)
+
+            # Simple sphere via scatter3d
+            fig.add_trace(go.Scatter3d(
+                x=[pos[0]], y=[pos[1]], z=[pos[2]],
+                mode='markers',
+                marker=dict(size=r * 15, color=color,
+                            line=dict(width=1, color='black')),
+                showlegend=False,
+                hovertext=f'Z={Z} ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})',
+            ))
+
+        fig.update_layout(
+            title=f'ESP Map: {label}',
+            scene=dict(
+                xaxis_title='x (Å)', yaxis_title='y (Å)', zaxis_title='z (Å)',
+                aspectmode='data',
+            ),
+            width=700, height=600,
+            margin=dict(l=10, r=10, t=40, b=10),
+        )
+
+        # Save interactive HTML
+        html_path = out_path / f"stage2_esp_{label}_3d.html"
+        fig.write_html(str(html_path), include_plotlyjs='cdn')
+
+        # Save static PNG
         png_path = out_path / f"stage2_esp_{label}.png"
-        fig.savefig(png_path, dpi=150)
-        plt.close(fig)
-        logger.info(f"  ESP map saved: {png_path}")
+        try:
+            fig.write_image(str(png_path), scale=2)
+        except Exception:
+            # kaleido may not be available
+            pass
+
+        logger.info(f"  ESP 3D map saved: {html_path}")
+
+        # Clean up temp density cube
+        import os
+        try:
+            os.remove(density_cube)
+        except Exception:
+            pass
 
     except Exception as e:
         logger.warning(f"  ESP map generation failed for {label}: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def generate_esp_maps_for_binding(monomer_name: str, template_smiles: str,
                                   monomer_smiles: str, solvent_name: str,
                                   eps: float, output_dir: str,
-                                  direction: str = "+x"):
+                                  prebuilt_complex_mol=None):
     """Generate ESP maps for template, monomer, and complex."""
     if not USE_ESP_MAP:
         return
 
     template_mol = smiles_to_mol3d(template_smiles)
     monomer_mol = smiles_to_mol3d(monomer_smiles)
-    complex_mol = build_complex_mol(template_mol, monomer_mol, direction=direction)
+    if prebuilt_complex_mol is not None:
+        complex_mol = prebuilt_complex_mol
+    else:
+        complex_mol = build_complex_mol(template_mol, monomer_mol)
 
     basis = DFT_SP_BASIS
     tag = f"{monomer_name}_{solvent_name}"

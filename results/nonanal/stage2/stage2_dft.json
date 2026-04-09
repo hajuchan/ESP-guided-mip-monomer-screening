@@ -1,0 +1,51 @@
+{
+  "APB": {
+    "Acetonitrile": {
+      "raw_dE": -42.102,
+      "bsse_dE": -20.809,
+      "bsse_correction": -21.293
+    }
+  },
+  "OPD": {
+    "Acetonitrile": {
+      "raw_dE": -3.287,
+      "bsse_dE": -15.269,
+      "bsse_correction": 11.982
+    }
+  },
+  "Styrene": {
+    "Acetonitrile": {
+      "raw_dE": -5.923,
+      "bsse_dE": -14.624,
+      "bsse_correction": 8.701
+    }
+  },
+  "4VB": {
+    "Acetonitrile": {
+      "raw_dE": -35.469,
+      "bsse_dE": -14.675,
+      "bsse_correction": -20.794
+    }
+  },
+  "4VP": {
+    "Acetonitrile": {
+      "raw_dE": -0.685,
+      "bsse_dE": -11.154,
+      "bsse_correction": 10.469
+    }
+  },
+  "MAA": {
+    "Acetonitrile": {
+      "raw_dE": -1.133,
+      "bsse_dE": -11.776,
+      "bsse_correction": 10.643
+    }
+  },
+  "MAAD": {
+    "Acetonitrile": {
+      "raw_dE": -2.641,
+      "bsse_dE": -16.535,
+      "bsse_correction": 13.893
+    }
+  }
+}

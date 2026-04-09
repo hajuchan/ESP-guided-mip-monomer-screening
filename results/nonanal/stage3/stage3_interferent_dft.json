@@ -1,0 +1,71 @@
+{
+  "Acetic Acid": {
+    "APB": {
+      "Acetonitrile": -19.083
+    },
+    "OPD": {
+      "Acetonitrile": -16.866
+    },
+    "Styrene": {
+      "Acetonitrile": -10.544
+    },
+    "4VB": {
+      "Acetonitrile": -15.976
+    },
+    "4VP": {
+      "Acetonitrile": -12.514
+    },
+    "MAA": {
+      "Acetonitrile": -17.24
+    },
+    "MAAD": {
+      "Acetonitrile": -22.772
+    }
+  },
+  "Ethanol": {
+    "APB": {
+      "Acetonitrile": -17.669
+    },
+    "OPD": {
+      "Acetonitrile": -14.869
+    },
+    "Styrene": {
+      "Acetonitrile": -8.505
+    },
+    "4VB": {
+      "Acetonitrile": -13.414
+    },
+    "4VP": {
+      "Acetonitrile": -10.076
+    },
+    "MAA": {
+      "Acetonitrile": -11.106
+    },
+    "MAAD": {
+      "Acetonitrile": -13.844
+    }
+  },
+  "Acetone": {
+    "APB": {
+      "Acetonitrile": -21.657
+    },
+    "OPD": {
+      "Acetonitrile": -15.452
+    },
+    "Styrene": {
+      "Acetonitrile": -13.123
+    },
+    "4VB": {
+      "Acetonitrile": -14.8
+    },
+    "4VP": {
+      "Acetonitrile": -11.395
+    },
+    "MAA": {
+      "Acetonitrile": -17.934
+    },
+    "MAAD": {
+      "Acetonitrile": -15.203
+    }
+  }
+}
