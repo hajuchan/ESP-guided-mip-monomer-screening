@@ -393,48 +393,121 @@ MIP pre-polymerization
 def run_md_pipeline(work_dir: Path, time_ns: float = 50.0,
                      temperature: float = 298.15,
                      gpu_id: str = "0") -> dict:
-    """Run full MD pipeline: EM → NVT → NPT → Production."""
-    work_dir = Path(work_dir)
-    dt = 0.002  # ps
+    """Run full MD pipeline: EM → NVT → NPT → Production.
 
-    # Energy minimization
-    logger.info("  EM...")
-    gmx(["grompp", "-f", "em.mdp", "-c", "ions.gro",
-         "-p", "topol.top", "-o", "em.tpr", "-maxwarn", "10"], work_dir)
-    gmx(["mdrun", "-deffnm", "em", "-nb", "gpu"], work_dir, timeout=300)
+    Features (matching Bio pipeline):
+    - Checkpoint resume: if md.cpt exists, resumes from last checkpoint
+    - GPU optimization: -nb gpu -pme gpu -bonded gpu -update gpu
+    - Skip completed stages (em.gro exists → skip EM, etc.)
+    - Real-time progress via -v flag on production
+    - Reduced trajectory for analysis (stride 100)
+    """
+    work_dir = Path(work_dir).resolve()
+    dt = 0.002  # ps (2 fs)
 
-    # NVT (100ps)
-    logger.info("  NVT (100ps)...")
-    nvt_mdp = MDP_NVT.format(nsteps=50000, dt=dt, temperature=temperature)
-    (work_dir / "nvt.mdp").write_text(nvt_mdp)
-    gmx(["grompp", "-f", "nvt.mdp", "-c", "em.gro", "-r", "em.gro",
-         "-p", "topol.top", "-o", "nvt.tpr", "-maxwarn", "10"], work_dir)
-    gmx(["mdrun", "-deffnm", "nvt", "-nb", "gpu"], work_dir, timeout=600)
+    # ── Energy minimization ──
+    if not (work_dir / "em.gro").exists():
+        logger.info("  EM...")
+        gmx(["grompp", "-f", "em.mdp", "-c", "ions.gro",
+             "-p", "topol.top", "-o", "em.tpr", "-maxwarn", "10"], work_dir)
+        gmx(["mdrun", "-deffnm", "em", "-nb", "gpu"], work_dir, timeout=300)
+    else:
+        logger.info("  EM: FOUND (skipping)")
 
-    # NPT (100ps)
-    logger.info("  NPT (100ps)...")
-    npt_mdp = MDP_NPT.format(nsteps=50000, dt=dt, temperature=temperature)
-    (work_dir / "npt.mdp").write_text(npt_mdp)
-    gmx(["grompp", "-f", "npt.mdp", "-c", "nvt.gro", "-r", "nvt.gro",
-         "-t", "nvt.cpt", "-p", "topol.top", "-o", "npt.tpr", "-maxwarn", "10"], work_dir)
-    gmx(["mdrun", "-deffnm", "npt", "-nb", "gpu"], work_dir, timeout=600)
+    if not (work_dir / "em.gro").exists():
+        return {"error": "EM failed — em.gro not created"}
 
-    # Production
+    # ── NVT equilibration (100ps) ──
+    if not (work_dir / "nvt.gro").exists():
+        logger.info("  NVT (100ps)...")
+        nvt_mdp = MDP_NVT.format(nsteps=50000, dt=dt, temperature=temperature)
+        (work_dir / "nvt.mdp").write_text(nvt_mdp)
+        gmx(["grompp", "-f", "nvt.mdp", "-c", "em.gro", "-r", "em.gro",
+             "-p", "topol.top", "-o", "nvt.tpr", "-maxwarn", "10"], work_dir)
+        gmx(["mdrun", "-deffnm", "nvt", "-nb", "gpu"], work_dir, timeout=600)
+    else:
+        logger.info("  NVT: FOUND (skipping)")
+
+    # ── NPT equilibration (100ps) ──
+    if not (work_dir / "npt.gro").exists():
+        logger.info("  NPT (100ps)...")
+        npt_mdp = MDP_NPT.format(nsteps=50000, dt=dt, temperature=temperature)
+        (work_dir / "npt.mdp").write_text(npt_mdp)
+        gmx(["grompp", "-f", "npt.mdp", "-c", "nvt.gro", "-r", "nvt.gro",
+             "-t", "nvt.cpt", "-p", "topol.top", "-o", "npt.tpr", "-maxwarn", "10"], work_dir)
+        gmx(["mdrun", "-deffnm", "npt", "-nb", "gpu"], work_dir, timeout=600)
+    else:
+        logger.info("  NPT: FOUND (skipping)")
+
+    # ── Production MD ──
     nsteps = int(time_ns * 1e6 / (dt * 1000))
     nstxout = max(5000, nsteps // 1000)
-    logger.info(f"  Production ({time_ns}ns, {nsteps} steps)...")
-    prod_mdp = MDP_PRODUCTION.format(
-        nsteps=nsteps, dt=dt, nstxout=nstxout, temperature=temperature)
-    (work_dir / "md.mdp").write_text(prod_mdp)
-    gmx(["grompp", "-f", "md.mdp", "-c", "npt.gro",
-         "-t", "npt.cpt", "-p", "topol.top", "-o", "md.tpr", "-maxwarn", "10"], work_dir)
-    gmx(["mdrun", "-deffnm", "md", "-nb", "gpu"],
-        work_dir, timeout=int(time_ns * 600))
+
+    # Generate tpr if not exists
+    if not (work_dir / "md.tpr").exists():
+        prod_mdp = MDP_PRODUCTION.format(
+            nsteps=nsteps, dt=dt, nstxout=nstxout, temperature=temperature)
+        (work_dir / "md.mdp").write_text(prod_mdp)
+        gmx(["grompp", "-f", "md.mdp", "-c", "npt.gro",
+             "-t", "npt.cpt", "-p", "topol.top", "-o", "md.tpr",
+             "-maxwarn", "10"], work_dir)
+
+    # Build mdrun command with GPU optimization
+    md_cmd = ["mdrun", "-deffnm", "md", "-v"]
+
+    # Resume from checkpoint if available (interrupted run)
+    md_cpt = work_dir / "md.cpt"
+    if md_cpt.exists():
+        md_cmd.extend(["-cpi", "md.cpt", "-append"])
+        logger.info(f"  Production: RESUMING from checkpoint ({time_ns}ns)")
+    else:
+        logger.info(f"  Production ({time_ns}ns, {nsteps} steps)...")
+
+    # Check if already completed
+    md_xtc = work_dir / "md.xtc"
+    md_log = work_dir / "md.log"
+    if md_xtc.exists() and md_log.exists():
+        # Check if finished by looking for "Finished" in log
+        try:
+            log_tail = md_log.read_text()[-500:]
+            if "Finished" in log_tail or "Performance" in log_tail:
+                logger.info("  Production: COMPLETED (skipping)")
+                return {
+                    "traj": str(md_xtc),
+                    "top": str(work_dir / "npt.gro"),
+                    "tpr": str(work_dir / "md.tpr"),
+                }
+        except Exception:
+            pass
+
+    # GPU flags (all-GPU offloading)
+    md_cmd.extend([
+        "-nb", "gpu",
+        "-pme", "gpu",
+        "-bonded", "gpu",
+        "-update", "gpu",
+        "-gpu_id", gpu_id,
+    ])
+
+    # Run production with real-time output (-v) via subprocess
+    full_cmd = [GMX_BIN] + md_cmd
+    logger.info(f"  CMD: {' '.join(full_cmd)}")
+    subprocess.run(full_cmd, cwd=str(work_dir),
+                   timeout=int(time_ns * 3600))  # timeout = time_ns hours
+
+    # ── Create reduced trajectory for analysis ──
+    reduced = work_dir / "md_reduced.xtc"
+    if not reduced.exists() and md_xtc.exists():
+        logger.info("  Creating reduced trajectory (stride 100)...")
+        gmx(["trjconv", "-f", "md.xtc", "-s", "md.tpr",
+             "-o", "md_reduced.xtc", "-skip", "100"],
+            work_dir, input_text="0\n", timeout=300)
 
     return {
-        "traj": str(work_dir / "md.xtc"),
+        "traj": str(md_xtc),
         "top": str(work_dir / "npt.gro"),
         "tpr": str(work_dir / "md.tpr"),
+        "reduced_traj": str(reduced) if reduced.exists() else None,
     }
 
 
@@ -661,38 +734,55 @@ def _copy_and_split_itp(src_itp: str, work_dir: Path, name: str) -> str:
 
 def analyze_md(work_dir: Path, template_name: str = "TMP",
                cutoff_A: float = 6.0) -> dict:
-    """Analyze MD trajectory: contact frequency, residence time, H-bonds, RDF."""
+    """Analyze MD trajectory: contact frequency, residence time, H-bonds, RDF.
+
+    Matching Bio pipeline analysis (phase4_md_validation.py):
+    - Contact frequency (6Å cutoff)
+    - Mean minimum distance
+    - Residence time (consecutive contact frames)
+    - RDF + EBN
+    - H-bond count (MDAnalysis HydrogenBondAnalysis)
+    - Uses reduced trajectory if available (stride 100)
+    """
     import MDAnalysis as mda
     import numpy as np
 
-    work_dir = Path(work_dir)
-    traj = work_dir / "md.xtc"
+    work_dir = Path(work_dir).resolve()
+
+    # Prefer reduced trajectory for speed
+    reduced = work_dir / "md_reduced.xtc"
+    traj = str(reduced) if reduced.exists() else str(work_dir / "md.xtc")
     top = work_dir / "npt.gro"
 
-    if not traj.exists():
+    if not Path(traj).exists():
         return {"error": "Trajectory not found"}
+    if not top.exists():
+        return {"error": "Topology (npt.gro) not found"}
 
-    u = mda.Universe(str(top), str(traj))
+    u = mda.Universe(str(top), traj)
     template = u.select_atoms(f"resname {template_name}")
     monomers = u.select_atoms("resname MON")
     n_frames = len(u.trajectory)
 
     if len(template) == 0 or len(monomers) == 0:
-        return {"error": "Template or monomer atoms not found"}
+        return {"error": f"Template ({len(template)}) or monomer ({len(monomers)}) atoms not found"}
+
+    logger.info(f"  Analyzing {n_frames} frames ({len(template)} template, {len(monomers)} monomer atoms)")
 
     # Use last 50% of trajectory
     start_frame = n_frames // 2
+    results = {}
 
-    # Contact frequency (6Å cutoff)
-    contact_count = 0
-    total_frames = 0
+    # ── Contact frequency + residence time ──
+    n_monomer_residues = len(monomers.residues)
+    contact_per_frame = []
     min_distances = []
-    hbond_count = 0
+    residence_counts = np.zeros(n_monomer_residues)  # consecutive contact frames
+    in_contact = np.zeros(n_monomer_residues, dtype=bool)
 
     for ts in u.trajectory[start_frame:]:
-        total_frames += 1
-        # Min distance between template and each monomer residue
-        for res in monomers.residues:
+        frame_contacts = 0
+        for ri, res in enumerate(monomers.residues):
             try:
                 dists = np.linalg.norm(
                     res.atoms.positions[:, np.newaxis, :] -
@@ -700,42 +790,88 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
                 min_d = dists.min()
                 min_distances.append(min_d)
                 if min_d < cutoff_A:
-                    contact_count += 1
+                    frame_contacts += 1
+                    if in_contact[ri]:
+                        residence_counts[ri] += 1
+                    in_contact[ri] = True
+                else:
+                    in_contact[ri] = False
             except Exception:
                 pass
+        contact_per_frame.append(frame_contacts)
 
-    n_monomer_residues = len(monomers.residues)
-    contact_freq = contact_count / (total_frames * n_monomer_residues) if total_frames > 0 else 0
+    total_frames = len(contact_per_frame)
+    total_contacts = sum(contact_per_frame)
+    contact_freq = total_contacts / (total_frames * n_monomer_residues) if total_frames > 0 else 0
+    mean_contacts_per_frame = np.mean(contact_per_frame) if contact_per_frame else 0
+    max_residence = float(residence_counts.max()) if len(residence_counts) > 0 else 0
 
-    # RDF
-    rdf_data = None
+    results["contact_frequency"] = round(float(contact_freq), 4)
+    results["mean_contacts_per_frame"] = round(float(mean_contacts_per_frame), 2)
+    results["max_residence_frames"] = int(max_residence)
+    results["mean_min_distance_A"] = round(float(np.mean(min_distances)), 2) if min_distances else None
+    results["n_frames_analyzed"] = total_frames
+
+    # ── RDF + EBN ──
     try:
         from MDAnalysis.analysis.rdf import InterRDF
         rdf = InterRDF(template, monomers, nbins=100, range=(0, 15.0))
         rdf.run(start=start_frame)
-        rdf_data = {
-            "r": rdf.results.bins.tolist(),
-            "g_r": rdf.results.rdf.tolist(),
-        }
-    except Exception as e:
-        logger.warning(f"  RDF failed: {e}")
+        r = rdf.results.bins
+        g_r = rdf.results.rdf
+        results["rdf"] = {"r": r.tolist(), "g_r": g_r.tolist()}
 
-    # EBN from RDF
-    ebn = 0.0
-    if rdf_data:
-        r = np.array(rdf_data["r"])
-        g_r = np.array(rdf_data["g_r"])
-        mask = r <= 3.5  # 3.5Å first shell
+        # EBN: integrate first solvation shell
+        mask = r <= 3.5
         _trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
         ebn = _trapz(g_r[mask] * r[mask]**2, r[mask]) * 4 * np.pi
+        results["EBN"] = round(float(ebn), 4)
+    except Exception as e:
+        logger.warning(f"  RDF/EBN failed: {e}")
+        results["EBN"] = 0.0
 
-    return {
-        "contact_frequency": round(float(contact_freq), 4),
-        "mean_min_distance_A": round(float(np.mean(min_distances)), 2) if min_distances else None,
-        "n_frames_analyzed": total_frames,
-        "EBN": round(float(ebn), 4),
-        "rdf": rdf_data,
-    }
+    # ── H-bond analysis ──
+    try:
+        from MDAnalysis.analysis.hydrogenbonds import HydrogenBondAnalysis
+        hb = HydrogenBondAnalysis(
+            u, d_a_cutoff=3.5, d_h_a_angle_cutoff=150,
+            donors_sel=f"resname {template_name}",
+            acceptors_sel="resname MON",
+        )
+        hb.run(start=start_frame)
+        n_hbonds_mean = hb.results.hbonds.shape[0] / total_frames if total_frames > 0 else 0
+        results["n_hbonds_mean"] = round(float(n_hbonds_mean), 2)
+        results["n_hbonds_total"] = int(hb.results.hbonds.shape[0])
+    except Exception as e:
+        logger.warning(f"  H-bond analysis failed: {e}")
+        results["n_hbonds_mean"] = 0
+        results["n_hbonds_total"] = 0
+
+    logger.info(f"  Analysis: contact_freq={results['contact_frequency']:.4f}, "
+                f"EBN={results.get('EBN', 0):.4f}, "
+                f"H-bonds={results.get('n_hbonds_mean', 0):.1f}/frame, "
+                f"residence={results['max_residence_frames']}frames")
+
+    return results
+
+
+def _parse_xvg(xvg_path: Path):
+    """Parse GROMACS .xvg file, returning numpy array of data columns."""
+    import numpy as np
+    xvg_path = Path(xvg_path)
+    if not xvg_path.exists():
+        return None
+    data = []
+    for line in xvg_path.read_text().splitlines():
+        if line.startswith(("#", "@")):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                data.append([float(x) for x in parts])
+            except ValueError:
+                pass
+    return np.array(data) if data else None
 
 
 # ── Helper Functions ──
