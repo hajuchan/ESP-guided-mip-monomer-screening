@@ -26,7 +26,6 @@ from rdkit.Chem import AllChem
 from .config import (
     TEMPLATE_SMILES,
     MONOMER_LIBRARY,
-    STAGE1_TOP_N,
     N_WORKERS,
     HARTREE_TO_KCAL,
     OUTPUT_DIRS,
@@ -806,15 +805,14 @@ def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
 
 def run_stage1(template_smiles: str = None,
                monomer_library: dict = None,
-               top_n: int = None,
                output_dir: str = OUTPUT_DIRS["stage1"]) -> list:
-    """Run xTB screening over all monomers in parallel.
+    """Run xTB screening over all monomers.
 
-    Returns list of top-N monomer names sorted by binding energy.
+    Returns list of monomer names with negative binding energy (dE < 0),
+    sorted by binding energy (most negative first).
     """
     template_smiles = template_smiles or TEMPLATE_SMILES
     monomer_library = monomer_library or MONOMER_LIBRARY
-    top_n = top_n or STAGE1_TOP_N
 
     logger.info(f"Stage 1: Screening {len(monomer_library)} monomers "
                 f"(mode={COMPLEX_SEARCH_MODE})")
@@ -857,7 +855,15 @@ def run_stage1(template_smiles: str = None,
                     logger.warning(f"  {res['name']:>10s}: FAILED — {res.get('error', '?')}")
 
     results.sort(key=lambda r: r["dE_kcal"])
-    top_results = results[:top_n]
+
+    # Filter: only monomers with negative binding energy (actual binding)
+    # dE < 0 means the complex is more stable than isolated molecules
+    bound = [r for r in results if r["dE_kcal"] < 0]
+    unbound = [r for r in results if r["dE_kcal"] >= 0]
+    if unbound:
+        logger.info(f"  Filtered out {len(unbound)} non-binding monomers (dE >= 0): "
+                    f"{[r['name'] for r in unbound]}")
+    top_results = bound
 
     with open(all_json, "w") as f:
         json.dump(results, f, indent=2)
@@ -865,7 +871,7 @@ def run_stage1(template_smiles: str = None,
         json.dump(top_results, f, indent=2)
 
     top_names = [r["name"] for r in top_results]
-    logger.info(f"Stage 1 complete. Top {len(top_names)}: {top_names}")
+    logger.info(f"Stage 1 complete. {len(top_names)} binding monomers: {top_names}")
     return top_names
 
 

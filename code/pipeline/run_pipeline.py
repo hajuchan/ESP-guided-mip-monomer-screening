@@ -38,7 +38,7 @@ def parse_args():
     )
     parser.add_argument(
         "--stage", type=str, default="all",
-        choices=["1", "2", "3", "4", "all"],
+        choices=["1", "2", "3", "4", "5", "6", "all"],
         help="Which stage to run (default: all)"
     )
     parser.add_argument(
@@ -132,6 +132,19 @@ def run_stage(stage_num: int, template_smiles: str, output_dir: str,
             output_dir=_stage_dir(output_dir, "stage4"),
         )
         result = {"md_results": md_results}
+
+    elif stage_num == 5:
+        from .stage5_vip import run_stage5
+        vip_results = run_stage5(
+            template_smiles=template_smiles,
+            output_dir=_stage_dir(output_dir, "stage5"),
+        )
+        result = {"vip_results": vip_results}
+
+    elif stage_num == 6:
+        from .stage6_recipe import run_stage6
+        recipe = run_stage6(output_dir=_stage_dir(output_dir, "reports"))
+        result = {"recipe": recipe}
 
     elapsed = time.time() - t0
     result["elapsed_s"] = round(elapsed, 1)
@@ -272,7 +285,7 @@ def main():
     prev_results = {}
 
     if args.stage == "all":
-        stages = [1, 2, 3, 4]
+        stages = [1, 2, 3, 4, 5, 6]
     else:
         stages = [int(args.stage)]
 

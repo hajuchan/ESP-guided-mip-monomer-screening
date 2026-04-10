@@ -23,7 +23,6 @@ from .config import (
     MONOMER_LIBRARY,
     INTERFERENT_LIBRARY,
     SOLVENTS,
-    STAGE3_TOP_N,
     N_WORKERS,
     KB_KCAL,
     TEMPERATURE,
@@ -32,6 +31,10 @@ from .config import (
     OUTPUT_DIRS,
     SOLVENT_STRATEGY,
     SYNTHESIS_SOLVENT,
+    CAVITY_CORRECTION,
+    CAVITY_ALPHA,
+    CAVITY_BETA,
+    compute_molecular_volume,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [Stage3] %(message)s")
@@ -171,21 +174,51 @@ def compute_interferent_binding(template_smiles: str,
 
 def compute_selectivity(template_dft: dict, interferent_dft: dict,
                         interferent_library: dict,
-                        solvents: dict) -> pd.DataFrame:
-    """Compute selectivity scores using the configured solvent strategy.
+                        solvents: dict,
+                        template_smiles: str = None) -> pd.DataFrame:
+    """Compute selectivity scores with cavity shape correction.
 
-    S = exp(ΔE / (kB·T)) where ΔE = E_template - E_interferent
-    Final score = mean of log(S) over all interferents.
+    Mukasa 2023 convention: E = |binding energy| (positive, larger = stronger)
+      ΔE = E_Tar - E_Int_eff > 0 → selective for template
+      S = exp(ΔE / kT), higher S → more selective
+
+    Cavity correction (when CAVITY_CORRECTION=True):
+      V_ratio = V_interferent / V_template
+      f_cavity = V_ratio^β  (filling factor, 0~1)
+      E_Int_eff = E_Int * f_cavity  (attenuated interferent binding)
+      ΔE = E_Tar - E_Int_eff + α * max(V_template - V_interferent, 0)
     """
     kbt = KB_KCAL * TEMPERATURE  # kcal/mol
+    template_smiles = template_smiles or TEMPLATE_SMILES
+
     logger.info(f"[Solvent strategy: {SOLVENT_STRATEGY}"
                 f"{' → ' + SYNTHESIS_SOLVENT if SOLVENT_STRATEGY == 'synthesis_match' else ''}]")
+    logger.info(f"[Cavity correction: {CAVITY_CORRECTION}"
+                f"{f', α={CAVITY_ALPHA}, β={CAVITY_BETA}' if CAVITY_CORRECTION else ''}]")
+
+    # Compute molecular volumes for cavity correction
+    vol_template = None
+    vol_interferents = {}
+    if CAVITY_CORRECTION:
+        try:
+            vol_template = compute_molecular_volume(template_smiles)
+            logger.info(f"  Template volume: {vol_template:.1f} Å³")
+            for interf_name, interf_smiles in interferent_library.items():
+                vol_interferents[interf_name] = compute_molecular_volume(interf_smiles)
+                logger.info(f"  {interf_name} volume: {vol_interferents[interf_name]:.1f} Å³"
+                            f" (ratio={vol_interferents[interf_name]/vol_template:.2f})")
+        except Exception as e:
+            logger.warning(f"  Volume computation failed: {e}, disabling cavity correction")
+            vol_template = None
 
     rows = []
     for m_name, solvent_data in template_dft.items():
         # Use solvent strategy to pick the representative energy
         e_template, selected_solvent = aggregate_solvent_energy(solvent_data)
-        logger.info(f"  {m_name}: {selected_solvent} bsse_dE = {e_template:+.3f} kcal/mol")
+
+        # Convert to absolute value (Mukasa convention: positive = stronger)
+        E_Tar = abs(e_template)
+        logger.info(f"  {m_name}: {selected_solvent} |E_Tar| = {E_Tar:.3f} kcal/mol")
 
         log_s_values = []
         for interf_name in interferent_library:
@@ -200,11 +233,22 @@ def compute_selectivity(template_dft: dict, interferent_dft: dict,
             elif isinstance(next(iter(interf_solvent_data.values())), dict):
                 e_interf, _ = aggregate_solvent_energy(interf_solvent_data)
             else:
-                # Legacy format: {solvent: bsse_dE_value}
                 e_interf = interf_solvent_data.get(selected_solvent,
                            next(iter(interf_solvent_data.values())))
 
-            delta_e = e_template - e_interf
+            E_Int = abs(e_interf)
+
+            # Cavity correction
+            if CAVITY_CORRECTION and vol_template and interf_name in vol_interferents:
+                v_interf = vol_interferents[interf_name]
+                v_ratio = min(v_interf / vol_template, 1.0)
+                f_cavity = v_ratio ** CAVITY_BETA
+                E_Int_eff = E_Int * f_cavity
+                delta_v = max(vol_template - v_interf, 0)
+                delta_e = E_Tar - E_Int_eff + CAVITY_ALPHA * delta_v
+            else:
+                delta_e = E_Tar - E_Int
+
             s_value = exp(delta_e / kbt)
             log_s = log(s_value) if s_value > 0 else 0.0
             log_s_values.append(log_s)
@@ -215,8 +259,10 @@ def compute_selectivity(template_dft: dict, interferent_dft: dict,
             "selected_solvent": selected_solvent,
             "solvent_strategy": SOLVENT_STRATEGY,
             "bsse_dE_template": round(e_template, 3),
+            "E_Tar": round(E_Tar, 3),
             "avg_log_S": round(avg_log_s, 3),
             "n_interferents": len(log_s_values),
+            "cavity_corrected": CAVITY_CORRECTION and vol_template is not None,
         })
 
     df = pd.DataFrame(rows)
@@ -227,23 +273,26 @@ def plot_results(df: pd.DataFrame, output_dir: str):
     """Generate binding energy vs selectivity scatter plot and bar chart."""
     out_path = Path(output_dir)
 
-    # ── Scatter: binding energy vs avg selectivity ───────────────────
+    # ── Scatter: binding strength vs selectivity (upper-right = best) ──
     fig, ax = plt.subplots(figsize=(10, 7))
     solvent_col = "selected_solvent" if "selected_solvent" in df.columns else "solvent"
+    # Use |bsse_dE| so higher = stronger binding (x-axis right = stronger)
     for solvent in df[solvent_col].unique():
         sub = df[df[solvent_col] == solvent]
-        ax.scatter(sub["bsse_dE_template"], sub["avg_log_S"],
+        x_vals = sub["bsse_dE_template"].abs()
+        ax.scatter(x_vals, sub["avg_log_S"],
                    label=solvent, s=80, alpha=0.7)
         for _, row in sub.iterrows():
-            ax.annotate(row["monomer"], (row["bsse_dE_template"], row["avg_log_S"]),
-                        fontsize=8, ha="left", va="bottom")
-    ax.set_xlabel("BSSE-corrected binding energy (kcal/mol)")
-    ax.set_ylabel("Average log(S) — selectivity")
-    ax.set_title("Binding Energy vs Selectivity")
+            ax.annotate(row["monomer"],
+                        (abs(row["bsse_dE_template"]), row["avg_log_S"]),
+                        fontsize=9, fontweight='bold', ha="left", va="bottom")
+    ax.set_xlabel("|Binding Energy| (kcal/mol) — stronger →", fontsize=12)
+    ax.set_ylabel("avg log(S) — more selective →", fontsize=12)
+    ax.set_title("Binding Strength vs Selectivity (upper-right = best monomer)", fontsize=13)
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out_path / "stage3_scatter.png", dpi=150)
+    fig.savefig(out_path / "stage3_scatter.png", dpi=300)
     plt.close(fig)
     logger.info(f"Saved scatter plot: {out_path / 'stage3_scatter.png'}")
 
@@ -296,9 +345,11 @@ def run_stage3(template_smiles: str = None,
 
     # Compute selectivity
     df = compute_selectivity(template_dft, interferent_dft,
-                             interferent_library, solvents)
+                             interferent_library, solvents,
+                             template_smiles=template_smiles)
 
-    # Save CSV
+    # Save CSV (sorted by avg_log_S descending — most selective first)
+    df = df.sort_values("avg_log_S", ascending=False).reset_index(drop=True)
     csv_path = out_path / "stage3_selectivity.csv"
     df.to_csv(csv_path, index=False)
     logger.info(f"Results saved: {csv_path}")
@@ -306,20 +357,48 @@ def run_stage3(template_smiles: str = None,
     # Plot
     plot_results(df, output_dir)
 
-    # Rank monomers by average selectivity across solvents
+    # Rank monomers by average selectivity (no filtering — all pass to Stage 4)
     ranking = (df.groupby("monomer")["avg_log_S"]
                .mean()
                .sort_values(ascending=False))
-    top_names = ranking.head(STAGE3_TOP_N).index.tolist()
+    top_names = ranking.index.tolist()  # All monomers, ranked
 
-    logger.info("Selectivity ranking:")
+    logger.info("Selectivity ranking (all passed to Stage 4):")
     for i, (name, score) in enumerate(ranking.items(), 1):
-        marker = " <<<" if name in top_names else ""
-        logger.info(f"  {i}. {name:>10s}: avg_log(S) = {score:+.3f}{marker}")
+        logger.info(f"  {i}. {name:>10s}: avg_log(S) = {score:+.3f}")
 
-    # Save top monomers
+    # Save all ranked monomers (Stage 4 receives all)
     with open(out_path / "stage3_top.json", "w") as f:
         json.dump(top_names, f, indent=2)
+
+    # Cross-linker recommendation (integrated from crosslinker.py)
+    from .config import CROSSLINKER_LIBRARY, CROSSLINKER_SCREENING, CROSSLINKER_THRESHOLD
+    if CROSSLINKER_SCREENING and CROSSLINKER_LIBRARY:
+        logger.info("\n--- Cross-linker screening ---")
+        try:
+            from .crosslinker import run_crosslinker_screening
+            cl_results = run_crosslinker_screening(
+                template_smiles=template_smiles,
+                output_dir=str(out_path))
+            # Recommend best cross-linker (weakest template binding)
+            if cl_results:
+                best_cl = None
+                best_be = float("-inf")
+                for cl_name, solvs in cl_results.items():
+                    for s_name, vals in solvs.items():
+                        if isinstance(vals, dict):
+                            be = vals.get("bsse_dE", vals.get("raw_dE", -999))
+                            if be > best_be:
+                                best_be = be
+                                best_cl = cl_name
+                if best_cl:
+                    logger.info(f"  Recommended cross-linker: {best_cl} "
+                                f"(template binding = {best_be:+.3f} kcal/mol, weakest)")
+                    with open(out_path / "stage3_crosslinker.json", "w") as f:
+                        json.dump({"recommended": best_cl,
+                                   "template_binding": best_be}, f, indent=2)
+        except Exception as e:
+            logger.warning(f"  Cross-linker screening failed: {e}")
 
     return top_names
 

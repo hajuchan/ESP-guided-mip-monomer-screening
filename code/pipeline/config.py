@@ -53,6 +53,7 @@ OUTPUT_DIRS = {
     "stage2":     f"{OUTPUT_DIR}/stage2",
     "stage3":     f"{OUTPUT_DIR}/stage3",
     "stage4":     f"{OUTPUT_DIR}/stage4",
+    "stage5":     f"{OUTPUT_DIR}/stage5",
     "features":   f"{OUTPUT_DIR}/features",
     "validation": f"{OUTPUT_DIR}/validation",
     "reports":    f"{OUTPUT_DIR}/reports",
@@ -104,6 +105,24 @@ SOLVENT_STRATEGY = "synthesis_match"
 # "average"         — 전 용매 평균
 # "worst"           — 가장 약한 결합에너지 (보수적 평가)
 SYNTHESIS_SOLVENT = "Acetonitrile"
+
+# Feature: Cavity Shape Selectivity (Stage 3)
+# MIP cavity의 3D 형상 선택성을 반영하는 보정
+# interferent가 template보다 작으면 cavity에 안정적으로 들어가지 못함
+CAVITY_CORRECTION = True
+CAVITY_ALPHA = 0.10    # additive penalty: kcal/(mol·Å³), vdW 에너지 밀도 기반
+CAVITY_BETA = 0.5      # multiplicative exponent for volume ratio
+
+
+def compute_molecular_volume(smiles: str) -> float:
+    """Compute 3D molecular volume (Å³) from SMILES using RDKit."""
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
+    AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+    AllChem.MMFFOptimizeMolecule(mol)
+    return AllChem.ComputeMolVolume(mol)
+
 
 # Feature 3: Template:Monomer 비율 스크리닝
 MD_RATIO_SCREENING = False      # True면 비율별 스크리닝
