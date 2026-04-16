@@ -9,7 +9,8 @@ Molecularly Imprinted Polymer(MIP) 합성을 위한 최적 functional monomer를
 ```
 Stage 1: ESP-guided 분자 표면 도킹 + GFN2-xTB 스크리닝
          ├── DFT ESP 전하 계산 (GPU, B3LYP/def2-SVP)
-         ├── ESP-guided vdW 표면 도킹 (적응형 ~200-400개)
+         ├── Functional group focused sampling (N,O,S 주변 5× 가중치)
+         ├── ESP-guided vdW 표면 도킹 (적응형 ~200개)
          ├── AutoDock Vina 도킹 (exhaustiveness=64)
          ├── GFN2-xTB SP 스크리닝 → 상위 10개 선별
          └── xTB full optimization → dE < 0 필터 (결합하는 것만 통과)
@@ -30,16 +31,16 @@ Stage 4: Pre-polymerization MD (GROMACS, GPU)
          ├── GAFF2 parameterization (acpype) + 보론 B→C 치환
          ├── Template + N×monomer + TIP3P water
          ├── EM → NVT → NPT → 50ns Production MD
-         ├── Contact frequency, RDF, EBN 분석
+         ├── Contact frequency, RDF, EBN, H-bond 분석
          └── 합성 비율 자동 결정 (contact freq 역비례)
     ↓ N개 (필터 없음)
 Stage 5: VIP Cavity Rebinding (GROMACS)
-         ├── 균등 간격 5개 snapshot 선택 (cherry-picking 방지)
+         ├── 균등 간격 3개 snapshot 선택 (cherry-picking 방지)
          ├── Monomer position restraint (1000 kJ/mol/nm²) → 중합 근사
-         ├── Template removal test → 이탈하면 "제거 가능" (적정 결합 = 좋은 MIP)
-         ├── Template rebinding MD → RMSD < 5Å = cavity 인식 성공
-         ├── Interferent rebinding → own만 성공이면 selective
-         └── VIP score = both_rate × (1 + selectivity)
+         ├── Template removal test (10ns) → RMSD > 8Å = 이탈 성공
+         ├── Template rebinding MD (10ns) → RMSD < 5Å = cavity 인식 성공
+         ├── Interferent rebinding → graded selectivity 평가
+         └── VIP score = rebind_rate × (1 + selectivity)
     ↓ VIP 순위
 Stage 6: 합성 레시피 자동 생성
          ├── Top 3 monomer + cross-linker + 비율
@@ -60,7 +61,7 @@ Template과 monomer의 최적 결합 배향을 탐색한다. Mukasa et al. (2023
 
 **프로토콜**:
 1. DFT 레벨 Mulliken 전하 계산 (B3LYP/def2-SVP, GPU ~7초/분자)
-2. vdW 표면 위에 ESP-guided orientation 생성 (분자 크기 적응형)
+2. **Functional group focused sampling**: 헤테로원자(N, O, S) 및 인접 원자 주변 표면점에 5× 가중치 부여 → C=O, OH, NH₂ 등 반응성 기능기 주변에 도킹 배향 집중 (~47% 배향이 기능기 5Å 이내)
 3. AutoDock Vina 도킹 (exhaustiveness=64) — 소수성/형태 적합성 보완
 4. GFN2-xTB SP screening → 상위 10개 선별
 5. xTB full optimization (L-BFGS-B) → 최적 결합에너지 + 좌표
@@ -68,6 +69,7 @@ Template과 monomer의 최적 결합 배향을 탐색한다. Mukasa et al. (2023
 
 **핵심 기술**:
 - Fibonacci sphere sampling으로 vdW 표면점 생성
+- **Functional group focused docking**: `functional_group_atoms` (Z ∈ {7,8,16} + neighbors)에 대해 가장 가까운 표면점 가중치 5배 증가. 균일 표면 샘플링의 편향 문제 해결 (긴 알킬 체인보다 C=O 등 반응 부위에 집중)
 - meeko 0.7+ API로 PDBQT 생성 (REMARK IDX 매핑으로 좌표 복원)
 - 최적화된 복합체 좌표를 `complex_coords`로 JSON 저장 → Stage 2 전달
 
@@ -89,6 +91,8 @@ Stage 1에서 찾은 최적 복합체 구조를 DFT 레벨에서 정밀 계산�
 **BSSE 보정**: Boys-Bernardi counterpoise를 **gas-phase에서** 수행 (PCM cavity 왜곡 방지).
 
 **xTB→DFT 좌표 전달**: Stage 1의 `complex_coords`를 읽어 `prebuilt_complex_mol`로 DFT에 전달. 방향 문자열이 아닌 실제 좌표를 전달하여 PES 불일치 방지.
+
+**ESP 시각화**: 3D vdW 표면 ESP 맵 (plotly interactive HTML + publication-quality PNG). 복합체 상태의 ESP도 생성하여 결합 부위 확인 가능.
 
 ### Stage 3: 선택도 평가 + Cross-linker 추천
 
@@ -121,15 +125,18 @@ E_Int_eff = E_Int × f_cavity + α × max(V_template - V_interferent, 0)
 Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한다.
 
 **시스템 구성**:
-- GAFF2 force field (acpype parameterization)
+- GAFF2 force field (acpype Python API로 parameterization)
 - 보론산(B) 분자: B→C 치환 + 문헌 B 파라미터 (Gerogiokas 2020)
-- Template 1개 + Monomer 4개 + TIP3P 수상자
-- 50ns NVT production MD (GROMACS GPU)
+- Template 1개 + Monomer 4개 + TIP3P 수용매
+- EM → NVT (1ns) → NPT (1ns) → 50ns Production MD (GROMACS GPU)
+- Checkpoint resume 지원 (`-cpi md.cpt -append`)
 
-**분석**:
+**분석** (MDAnalysis):
 - Contact frequency (6Å cutoff): monomer가 template 근처에 머무는 빈도
 - RDF (Radial Distribution Function): 거리별 monomer 밀도
 - EBN (Effective Binding Number): 첫 번째 solvation shell 내 coordination number
+- **H-bond 분석**: bidirectional HydrogenBondAnalysis (TPR topology, 전체 trajectory)
+- Template/monomer 식별: resid 기반 (acpype "UNL" resname 문제 회피)
 
 **합성 비율 자동 결정**: Contact frequency의 역비례 — 약한 결합 monomer를 더 많이 넣어 균등한 cavity 형성.
 
@@ -139,18 +146,35 @@ Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한
 
 Virtually Imprinted Polymer (VIP) 방식으로 실제 MIP cavity 형성과 rebinding을 시뮬레이션한다 (Zink & Moura, PCCP 2018).
 
-**Inverted-U 관계 해결**:
-- 너무 강한 결합 → template 제거 불가 → bad cavity → 낮은 IF
-- 너무 약한 결합 → 인식점 없음 → 낮은 IF
-- **적당한 결합 → 깨끗한 제거 + 성공적 rebinding → 높은 IF**
-
 **프로토콜**:
-1. Stage 4 trajectory 후반 50%에서 **균등 간격 5개 snapshot** 선택
+1. Stage 4 trajectory 후반 50%에서 **균등 간격 3개 snapshot** 선택
 2. Monomer position restraint (1000 kJ/mol/nm²) → 중합 근사
-3. **Template removal test** (10ns): template이 이탈하면 제거 가능 (moderate binding = good)
-4. **Rebinding MD** (10ns): template RMSD < 5Å → cavity 인식 성공
-5. **Selectivity**: interferent rebinding → own만 성공이면 selective
-6. **VIP score = both_rate × (1 + selectivity)** → 최종 순위
+3. **Template removal test** (10ns): template RMSD > 8Å → 이탈 성공 (제거 가능)
+4. **Rebinding MD** (10ns): template 5Å 변위 후 release, RMSD < 5Å → cavity 인식 성공
+5. **Interferent rebinding**: 각 interferent에 대해 동일 rebinding test
+
+**VIP Scoring** (문헌 기반 재설계):
+```
+VIP score = rebind_rate × (1 + selectivity)
+```
+
+- **rebind_rate**: template이 cavity로 되돌아오는 비율 (primary metric, Zink 2018)
+- **selectivity**: graded scoring — `1 - mean(interf_rebind_rate / template_rebind_rate)`
+  - interferent가 template만큼 rebinding하면 sel ≈ 0 (비선택적)
+  - interferent가 template보다 덜 rebinding하면 sel > 0 (선택적)
+- **Fallback**: removal이 작동하는 큰 template에서는 `both_rate × (1 + selectivity)` 사용
+
+**Scoring 설계 근거:**
+
+원래 VIP score는 `both_rate (removal AND rebinding)` 기반이었으나, 소분자 template(hexanal 등)에서는 10ns MD 내에 8Å 이상 이탈이 거의 발생하지 않아 removal_rate ≈ 0이 됨. Zink 2018 원논문은 17β-estradiol(272Å³, 복잡한 스테로이드)을 사용했기 때문에 removal이 잘 작동했으나, 직쇄형 알데히드(115Å³)에서는 한계가 있음.
+
+또한 소분자 cavity에서는 **shape selectivity가 약함** — 더 작은 interferent(acetic acid 57Å³, ethanol 54Å³)가 hexanal cavity에 쉽게 들어가므로 RMSD 기반 binary selectivity는 차별력이 부족함. 따라서 graded selectivity로 변경.
+
+소분자 template의 경우, **화학적 상호작용** (H-bond, 정전기)이 cavity shape보다 selectivity에 더 중요하며, 이는 Stage 3의 DFT selectivity로 보완됨.
+
+**구현 세부사항**:
+- Template/monomer 식별: resid 기반 (첫 번째 non-solvent residue = template)
+- acpype가 모든 분자에 "UNL" resname을 부여하므로 resname 대신 resid로 구분
 
 ### Stage 6: 합성 레시피 자동 생성
 
@@ -192,10 +216,18 @@ python run_pipeline.py --stage 1 --output-dir results/hexanal
 python run_pipeline.py --stage 4 --output-dir results/hexanal
 python run_pipeline.py --stage 5 --output-dir results/hexanal
 
+# Template override (config.py 수정 없이)
+python run_pipeline.py --template "CCCCCCCCC=O" --stage all --output-dir results/nonanal
+
 # 추가 기능
 python run_pipeline.py --crosslinker --output-dir results/hexanal
 python run_pipeline.py --suggest-interferents
+python run_pipeline.py --auto-interferents
 python run_pipeline.py --report --output-dir results/hexanal
+python run_pipeline.py --predict-if --output-dir results/hexanal
+
+# 실험 IF 데이터 업데이트
+python run_pipeline.py --update-if-model --monomer MAA --experimental-if 15
 ```
 
 ### 디렉토리 구조
@@ -205,17 +237,17 @@ MIP_simulation/
 ├── run_pipeline.py              # 엔트리포인트
 ├── run_validation.py            # 검증 실행
 ├── run_selectivity.py           # 선택도 검증 (범함수 비교)
-├── environment.yml              # conda 환경
+├── environment.yml              # conda 환경 (MIPscreen)
 ├── code/pipeline/
 │   ├── config.py                # 전역 설정
 │   ├── run_pipeline.py          # Stage 오케스트레이터
 │   ├── stage1_xtb.py            # ESP 도킹 + xTB 스크리닝
-│   ├── stage2_dft.py            # DFT 결합에너지
+│   ├── stage2_dft.py            # DFT 결합에너지 + ESP 시각화
 │   ├── stage3_selectivity.py    # 선택도 + cross-linker
 │   ├── stage4_md.py             # GROMACS pre-polymerization MD
 │   ├── stage5_vip.py            # VIP cavity rebinding
 │   ├── stage6_recipe.py         # 합성 레시피
-│   ├── utils_gromacs.py         # GROMACS 유틸리티
+│   ├── utils_gromacs.py         # GROMACS 유틸리티 (parameterization, MD, 분석)
 │   ├── crosslinker.py           # Cross-linker DFT
 │   ├── generate_report.py       # HTML 리포트
 │   ├── suggest_interferents.py  # Interferent 자동 제안
@@ -234,11 +266,24 @@ MIP_simulation/
 
 ---
 
+## 현재 설정 (config.py)
+
+| 항목 | 값 |
+|------|-----|
+| Template | Hexanal (`CCCCCC=O`) |
+| Monomers (11) | MAA, MAAD, 4VP, OPD, ACM, PYR, 4VB, APB, Styrene, AA, NVP |
+| Interferents (3) | Acetic acid, Ethanol, Acetone |
+| Solvent | Acetonitrile (ε=35.69) |
+| Workers | 11 (CPU), 1 (GPU) |
+
+---
+
 ## 핵심 파라미터
 
 | Stage | 파라미터 | 값 | 근거 |
 |-------|---------|-----|------|
 | 1 | ESP 전하 | B3LYP/def2-SVP Mulliken (GPU) | DFT 레벨 정확도, ~7초/분자 |
+| 1 | Functional group boost | 5× (N, O, S + neighbors) | 반응 부위 집중 탐색, 균일 샘플링 편향 해소 |
 | 1 | Vina exhaustiveness | 64 | MIP 소분자 복합체용 (기본 8의 8배) |
 | 1 | 필터 기준 | dE < 0 | 결합하는 monomer만 통과 (개수 자동) |
 | 2 | 범함수 | ωB97XD / ωB97M-V (적응형) | H-bond/분산력 시스템별 최적 |
@@ -246,13 +291,15 @@ MIP_simulation/
 | 2 | 용매 모델 | PCM (IEF-PCM) | GPU gradient 지원 (ddCOSMO 불가) |
 | 3 | Cavity α | 0.10 kcal/(mol·Å³) | vdW 에너지 밀도 기반 물리 상수 |
 | 3 | Cavity β | 0.5 | 비선형 cavity filling (표면적 ∝ V^(2/3)) |
-| 4 | Force field | GAFF2 (acpype) | 소분자 표준 |
+| 4 | Force field | GAFF2 (acpype Python API) | 소분자 표준 |
 | 4 | 보론 파라미터 | B→C 치환 + 문헌값 | Gerogiokas 2020 |
 | 4 | MD 시간 | 50 ns | 평형 도달 |
-| 5 | Snapshot | 균등 간격 5개 | Cherry-picking 방지 (Zink 2018) |
+| 4 | Template:monomer 비율 | 1:4 | 고정 |
+| 5 | Snapshot | 균등 간격 3개 | Cherry-picking 방지 (Zink 2018) |
 | 5 | Position restraint | 1000 kJ/mol/nm² | 중합 근사 |
 | 5 | Rebinding 기준 | RMSD < 5 Å | Cavity 인식 성공 |
 | 5 | Removal 기준 | RMSD > 8 Å | Template 이탈 (제거 가능) |
+| 5 | Scoring | rebind_rate × (1 + graded selectivity) | 소분자 template 최적화 |
 
 ---
 
@@ -275,6 +322,7 @@ MIP_simulation/
 | Boron B→C substitution | acpype [18] + custom frcmod | Gerogiokas et al. 2020 [10] | 4 |
 | Pre-polymerization MD | GROMACS [13] GPU | Muñoz et al. 2024 [4] | 4 |
 | Contact frequency / EBN | MDAnalysis [16] | Ye et al. 2024 [5] | 4 |
+| H-bond analysis | MDAnalysis [16] (HydrogenBondAnalysis) | — | 4 |
 | VIP cavity rebinding | GROMACS [13] + MDAnalysis [16] | Zink & Moura 2018 [3] | 5 |
 
 ---
@@ -292,7 +340,10 @@ source /usr/local/gromacs-gpu/bin/GMXRC
 # 확인
 python -c "from tblite.interface import Calculator; print('tblite OK')"
 python -c "import pyscf; print('pyscf OK')"
+python -c "import gpu4pyscf; print('gpu4pyscf OK')"
 python -c "import MDAnalysis; print('MDAnalysis OK')"
+python -c "import openmm; print('OpenMM OK')"
+python -c "from vina import Vina; print('Vina OK')"
 gmx --version
 ```
 
@@ -304,6 +355,23 @@ gmx --version
 | CPU | 8코어 | 16코어 |
 | RAM | 16GB | 32GB |
 | GROMACS | 2023+ (GPU build) | 2025.2 |
+| Python | 3.11 | 3.11 (tblite 호환) |
+
+---
+
+## 알려진 이슈 및 해결책
+
+| 이슈 | 원인 | 해결 |
+|------|------|------|
+| meeko `restraints` AttributeError | meeko 0.7+ API 변경 | `prepare()` return value 사용 |
+| Vina PDBQT 원자 불일치 | `merge_these_atom_types` 기본값 | REMARK IDX 매핑으로 좌표 복원 |
+| acpype "UNL" resname | acpype가 모든 분자에 UNL 부여 | resid 기반 template/monomer 식별 |
+| GROMACS `[ atomtypes ]` 순서 에러 | ITP에 atomtypes 포함 시 directive 순서 오류 | `_copy_and_split_itp()`로 분리 |
+| ddCOSMO GPU gradient 미지원 | gpu4pyscf 제한 | PCM (IEF-PCM)으로 대체 |
+| 보론산 GAFF2 파라미터 부재 | GAFF2에 B 파라미터 없음 | B→C 치환 + 문헌 파라미터 (Gerogiokas 2020) |
+| H-bond 분석 0건 | 축약 trajectory + 단방향 분석 | 전체 trajectory + bidirectional + TPR topology |
+| VIP score 전부 0 | 소분자 template 10ns 내 8Å 이탈 불가 (removal_rate=0) | rebind_rate를 primary metric으로 변경 (both_rate fallback) |
+| VIP selectivity ≈ 0 | 소분자 interferent가 cavity에 쉽게 진입 (RMSD binary 판정) | graded selectivity: `1 - mean(interf/template rebind ratio)` |
 
 ---
 

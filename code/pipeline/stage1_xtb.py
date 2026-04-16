@@ -70,6 +70,58 @@ def smiles_to_mol3d(smiles: str, n_confs: int = 10) -> Chem.Mol:
     return new_mol.GetMol()
 
 
+def smiles_to_mol3d_ensemble(smiles: str, n_confs: int = 10,
+                              n_keep: int = 3) -> list:
+    """Generate multiple diverse 3D conformers for ensemble docking.
+
+    Returns list of RDKit Mol objects (up to n_keep), sorted by MMFF energy.
+    Conformers are filtered by RMSD diversity (> 0.5Å).
+    Ref: Bio project Phase 1 ensemble docking approach.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"Invalid SMILES: {smiles}")
+    mol = Chem.AddHs(mol)
+    params = AllChem.ETKDGv3()
+    params.randomSeed = 42
+    params.numThreads = 1
+    cids = AllChem.EmbedMultipleConfs(mol, numConfs=n_confs, params=params)
+    if len(cids) == 0:
+        return [smiles_to_mol3d(smiles)]
+
+    results = AllChem.MMFFOptimizeMoleculeConfs(mol, numThreads=1)
+    energies = [(e, i) for i, (c, e) in enumerate(results) if c == 0]
+    if not energies:
+        return [smiles_to_mol3d(smiles)]
+    energies.sort()
+
+    # Select diverse conformers by RMSD filtering
+    from rdkit.Chem import AllChem as _AC
+    kept = []
+    for e, cid in energies:
+        if len(kept) >= n_keep:
+            break
+        is_diverse = True
+        for _, kept_cid in kept:
+            rmsd = _AC.GetConformerRMS(mol, cid, kept_cid)
+            if rmsd < 0.5:  # too similar
+                is_diverse = False
+                break
+        if is_diverse:
+            kept.append((e, cid))
+
+    # Return individual Mol objects per conformer
+    conformers = []
+    for e, cid in kept:
+        new_mol = Chem.RWMol(mol)
+        for c in [c.GetId() for c in new_mol.GetConformers()]:
+            if c != cid:
+                new_mol.RemoveConformer(c)
+        conformers.append(new_mol.GetMol())
+
+    return conformers if conformers else [smiles_to_mol3d(smiles)]
+
+
 def mol_to_arrays(mol: Chem.Mol):
     """Extract atomic numbers and coordinates (Angstrom) from RDKit Mol."""
     conf = mol.GetConformer()
@@ -89,10 +141,20 @@ def xtb_single_point(numbers: np.ndarray, positions: np.ndarray) -> float:
 def xtb_optimize(numbers: np.ndarray, positions: np.ndarray,
                  tmpdir: str = None, max_iter: int = 200,
                  tol: float = 1e-4) -> tuple:
-    """Optimize geometry with GFN2-xTB via L-BFGS-B.
+    """Optimize geometry with GFN2-xTB.
+
+    Uses xtb binary's native ANCOPT optimizer (superior for non-covalent
+    complexes on flat PES). Falls back to scipy L-BFGS-B if xtb not available.
 
     Returns (energy_hartree, optimized_positions_angstrom).
     """
+    # Try native xtb optimizer first (ANCOPT — better for weak complexes)
+    try:
+        return _xtb_optimize_native(numbers, positions, max_iter)
+    except Exception:
+        pass
+
+    # Fallback: scipy L-BFGS-B with tblite
     from tblite.interface import Calculator
     from scipy.optimize import minimize
 
@@ -109,6 +171,54 @@ def xtb_optimize(numbers: np.ndarray, positions: np.ndarray,
                       options={"maxiter": max_iter, "ftol": tol})
     opt_pos = result.x.reshape(n_atoms, 3) / ANG_TO_BOHR
     return result.fun, opt_pos
+
+
+def _xtb_optimize_native(numbers, positions, max_iter=200):
+    """Run xtb --opt using the native binary (ANCOPT algorithm)."""
+    import subprocess, tempfile, os, shutil
+
+    xtb_bin = shutil.which("xtb")
+    if not xtb_bin:
+        raise FileNotFoundError("xtb binary not found")
+
+    with tempfile.TemporaryDirectory(prefix="xtb_opt_") as td:
+        # Write xyz
+        n = len(numbers)
+        _ELEM = {1:'H',6:'C',7:'N',8:'O',9:'F',16:'S',17:'Cl',5:'B',35:'Br',15:'P'}
+        xyz_path = os.path.join(td, "input.xyz")
+        with open(xyz_path, "w") as f:
+            f.write(f"{n}\n\n")
+            for z, pos in zip(numbers, positions):
+                sym = _ELEM.get(int(z), f"X{z}")
+                f.write(f"{sym} {pos[0]:.8f} {pos[1]:.8f} {pos[2]:.8f}\n")
+
+        result = subprocess.run(
+            [xtb_bin, "input.xyz", "--opt", "normal", "--iterations", str(max_iter),
+             "--gfn", "2"],
+            capture_output=True, text=True, timeout=300, cwd=td
+        )
+
+        # Parse optimized geometry from xtbopt.xyz
+        opt_xyz = os.path.join(td, "xtbopt.xyz")
+        if not os.path.exists(opt_xyz):
+            raise RuntimeError("xtb optimization failed: no xtbopt.xyz")
+
+        with open(opt_xyz) as f:
+            lines = f.readlines()
+        opt_pos = np.zeros((n, 3))
+        for i in range(n):
+            parts = lines[i + 2].split()
+            opt_pos[i] = [float(parts[1]), float(parts[2]), float(parts[3])]
+
+        # Parse energy from output
+        energy = None
+        for line in result.stdout.split("\n"):
+            if "TOTAL ENERGY" in line:
+                energy = float(line.split()[3])
+        if energy is None:
+            raise RuntimeError("Could not parse energy from xtb output")
+
+        return energy, opt_pos
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -323,13 +433,35 @@ def generate_docked_orientations(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
 
     surface_pts = generate_surface_points(template_mol)
 
-    # Weight surface points by |charge| — prioritize electrostatically active sites
+    # ── Identify reactive functional groups on template ──
+    # Heteroatoms (O, N, S) and their neighbors are H-bond sites
+    # These should get 50% of total orientations (focused sampling)
+    functional_group_atoms = set()
+    for i in range(template_mol.GetNumAtoms()):
+        atom = template_mol.GetAtomWithIdx(i)
+        Z = atom.GetAtomicNum()
+        if Z in (7, 8, 16):  # N, O, S
+            functional_group_atoms.add(i)
+            # Include neighbors (C=O carbon, N-H hydrogen, etc.)
+            for neighbor in atom.GetNeighbors():
+                functional_group_atoms.add(neighbor.GetIdx())
+
+    if functional_group_atoms:
+        fg_names = [template_mol.GetAtomWithIdx(i).GetSymbol() for i in functional_group_atoms]
+        logger.info(f"    Functional group atoms: {len(functional_group_atoms)} "
+                    f"({', '.join(set(fg_names))})")
+
+    # Weight surface points: functional group region gets much higher weight
     surface_weights = np.zeros(len(surface_pts))
     for i, pt in enumerate(surface_pts):
         dists_to_atoms = np.linalg.norm(t_pos - pt, axis=1)
         closest = np.argmin(dists_to_atoms)
-        # Weight = |charge| + small baseline (ensure all regions get some sampling)
-        surface_weights[i] = abs(t_charges[closest]) + 0.05
+        # Base weight from charge
+        w = abs(t_charges[closest]) + 0.05
+        # Boost 5x if nearest atom is part of a functional group
+        if closest in functional_group_atoms:
+            w *= 5.0
+        surface_weights[i] = w
     surface_weights /= surface_weights.sum()
 
     # Multi-offset distances
@@ -340,7 +472,7 @@ def generate_docked_orientations(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
     valid = []
 
     for offset in offsets:
-        # Sample surface points weighted by charge magnitude
+        # Sample surface points weighted by charge + functional group boost
         indices = rng.choice(len(surface_pts), n_per_offset,
                              replace=True, p=surface_weights)
 
@@ -696,8 +828,41 @@ def compute_binding_energy(monomer_name: str, monomer_smiles: str,
 
 def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
                          template_mol: Chem.Mol) -> dict:
-    """QuantumDock-style: surface orientations → SP screen → optimize."""
+    """QuantumDock-style: surface orientations → SP screen → optimize.
+
+    If ENSEMBLE_DOCKING is True in config, generates multiple template
+    conformers and docks to each, taking the best binding energy.
+    """
+    # Ensemble docking: try multiple monomer conformers, take best
+    try:
+        from .config import ENSEMBLE_DOCKING
+    except ImportError:
+        ENSEMBLE_DOCKING = False
+
+    if ENSEMBLE_DOCKING:
+        conformers = smiles_to_mol3d_ensemble(monomer_smiles, n_confs=10, n_keep=3)
+        best_result = None
+        for ci, conf_mol in enumerate(conformers):
+            try:
+                result = _quantumdock_single(monomer_name, conf_mol, template_mol)
+                if result.get("success") and (
+                    best_result is None or result["dE_kcal"] < best_result["dE_kcal"]
+                ):
+                    best_result = result
+                    best_result["ensemble_conformer"] = ci
+            except Exception:
+                pass
+        if best_result:
+            best_result["n_conformers_tested"] = len(conformers)
+            return best_result
+
     monomer_mol = smiles_to_mol3d(monomer_smiles)
+    return _quantumdock_single(monomer_name, monomer_mol, template_mol)
+
+
+def _quantumdock_single(monomer_name: str, monomer_mol: Chem.Mol,
+                         template_mol: Chem.Mol) -> dict:
+    """Single-conformer QuantumDock computation."""
 
     # Adaptive orientation count based on molecular size
     n_orient = _adaptive_n_orientations(template_mol, monomer_mol)
@@ -789,7 +954,7 @@ def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
         "success": True,
         "search_mode": "quantumdock",
         "fast_screen_method": "GFN2-xTB_singlepoint",
-        "n_orientations_generated": N_DOCK_ORIENTATIONS,
+        "n_orientations_generated": n_valid,
         "n_orientations_valid": n_valid,
         "n_top_optimized": len(top),
         "best_direction": f"site_{site['atom_idx']}_{site['type']}",

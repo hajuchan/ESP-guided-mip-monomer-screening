@@ -241,22 +241,202 @@ def parameterize_small_molecule(smiles: str, name: str,
 
 # ── System Building ──
 
-def build_mip_system(template_smiles: str, template_name: str,
-                      monomer_smiles: str, monomer_name: str,
-                      n_monomers: int, work_dir: Path,
-                      box_size: float = 4.0,
-                      temperature: float = 298.15) -> dict:
-    """Build a pre-polymerization system: template + N monomers + water.
 
-    1. Parameterize template and monomer (acpype/GAFF2)
-    2. Create box with template at center, monomers randomly placed
-    3. Solvate with TIP3P water
-    4. Add ions to neutralize
+def build_multi_monomer_system(template_smiles, template_name,
+                                monomer_dict, n_per_monomer,
+                                work_dir, box_size=5.0,
+                                temperature=298.15,
+                                crosslinker_smiles=None,
+                                crosslinker_name=None,
+                                n_crosslinker=0):
+    """Build a pre-polymerization system with multiple monomer types.
+
+    Args:
+        monomer_dict: {name: smiles} for each monomer type to include
+        n_per_monomer: number of copies per monomer type
+
+    Reference: Bio project Phase 4 multi-monomer system building.
     """
     work_dir = Path(work_dir).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"  Building system: {template_name} + {n_monomers}× {monomer_name}")
+    names = list(monomer_dict.keys())
+    logger.info(f"  Multi-monomer system: {template_name} + "
+                f"{' + '.join(f'{n_per_monomer}×{n}' for n in names)}")
+
+    # Parameterize template
+    tmpl_param = parameterize_small_molecule(
+        template_smiles, template_name, work_dir / "param_template")
+    if "error" in tmpl_param:
+        return {"error": f"Template parameterization failed: {tmpl_param['error']}"}
+
+    tmpl_itp = _copy_and_split_itp(tmpl_param["itp"], work_dir, template_name)
+
+    # Parameterize each monomer type
+    mono_params = {}
+    for m_name, m_smiles in monomer_dict.items():
+        p = parameterize_small_molecule(m_smiles, m_name, work_dir / f"param_{m_name}")
+        if "error" in p:
+            logger.warning(f"  {m_name} parameterization failed, skipping")
+            continue
+        _copy_and_split_itp(p["itp"], work_dir, m_name)
+        mono_params[m_name] = p
+
+    if not mono_params:
+        return {"error": "All monomer parameterizations failed"}
+
+    # Parameterize cross-linker if provided
+    xl_param = None
+    if crosslinker_smiles and n_crosslinker > 0:
+        xl_param = parameterize_small_molecule(
+            crosslinker_smiles, crosslinker_name, work_dir / "param_crosslinker")
+        if "error" not in xl_param:
+            _copy_and_split_itp(xl_param["itp"], work_dir, crosslinker_name)
+        else:
+            xl_param = None
+
+    # Build initial GRO: template + all monomers + cross-linker
+    import numpy as np
+    center = box_size / 2.0
+    rng = np.random.RandomState(42)
+
+    tmpl_lines = Path(tmpl_param["gro"]).read_text().strip().split("\n")
+    tmpl_natoms = int(tmpl_lines[1].strip())
+    tmpl_atoms = tmpl_lines[2:2+tmpl_natoms]
+
+    tmpl_offset = _gro_center_offset(tmpl_atoms, center, center, center)
+    all_atoms = list(_shift_gro_atoms(tmpl_atoms, *tmpl_offset, resnum=1, resname="TMP"))
+    resnum = 2
+
+    # Place each monomer type
+    for m_name, p in mono_params.items():
+        mono_lines = Path(p["gro"]).read_text().strip().split("\n")
+        mono_natoms = int(mono_lines[1].strip())
+        mono_atoms = mono_lines[2:2+mono_natoms]
+
+        for i in range(n_per_monomer):
+            while True:
+                x = rng.uniform(0.5, box_size - 0.5)
+                y = rng.uniform(0.5, box_size - 0.5)
+                z = rng.uniform(0.5, box_size - 0.5)
+                if np.sqrt((x-center)**2+(y-center)**2+(z-center)**2) > 1.0:
+                    break
+            offset = _gro_center_offset(mono_atoms, x, y, z)
+            shifted = _shift_gro_atoms(mono_atoms, *offset, resnum=resnum,
+                                        resname=m_name[:3].upper())
+            all_atoms.extend(shifted)
+            resnum += 1
+
+    # Place cross-linker
+    if xl_param and n_crosslinker > 0:
+        xl_lines = Path(xl_param["gro"]).read_text().strip().split("\n")
+        xl_natoms = int(xl_lines[1].strip())
+        xl_atoms = xl_lines[2:2+xl_natoms]
+        for i in range(n_crosslinker):
+            while True:
+                x = rng.uniform(0.5, box_size - 0.5)
+                y = rng.uniform(0.5, box_size - 0.5)
+                z = rng.uniform(0.5, box_size - 0.5)
+                if np.sqrt((x-center)**2+(y-center)**2+(z-center)**2) > 0.8:
+                    break
+            offset = _gro_center_offset(xl_atoms, x, y, z)
+            shifted = _shift_gro_atoms(xl_atoms, *offset, resnum=resnum, resname="XLK")
+            all_atoms.extend(shifted)
+            resnum += 1
+
+    # Write system GRO
+    with open(work_dir / "system.gro", "w") as f:
+        f.write("MIP multi-monomer pre-polymerization\n")
+        f.write(f" {len(all_atoms)}\n")
+        for line in all_atoms:
+            f.write(line + "\n")
+        f.write(f"   {box_size:.5f}   {box_size:.5f}   {box_size:.5f}\n")
+
+    # Write topology with all monomer types
+    atomtype_includes = ""
+    mol_includes = f'#include "{template_name}.itp"\n'
+    mol_section = f"{template_name}    1\n"
+
+    all_names = [template_name] + list(mono_params.keys())
+    if xl_param:
+        all_names.append(crosslinker_name)
+
+    for name in all_names:
+        at_file = work_dir / f"{name}_atomtypes.itp"
+        if at_file.exists():
+            atomtype_includes += f'#include "{name}_atomtypes.itp"\n'
+
+    for m_name in mono_params:
+        mol_includes += f'#include "{m_name}.itp"\n'
+        mol_section += f"{m_name}    {n_per_monomer}\n"
+    if xl_param:
+        mol_includes += f'#include "{crosslinker_name}.itp"\n'
+        mol_section += f"{crosslinker_name}    {n_crosslinker}\n"
+
+    top = f"""; MIP multi-monomer pre-polymerization topology
+#include "amber99sb-ildn.ff/forcefield.itp"
+{atomtype_includes}
+{mol_includes}
+#include "amber99sb-ildn.ff/tip3p.itp"
+#include "amber99sb-ildn.ff/ions.itp"
+
+[ system ]
+MIP multi-monomer pre-polymerization
+
+[ molecules ]
+{mol_section}"""
+    (work_dir / "topol.top").write_text(top)
+    (work_dir / "em.mdp").write_text(MDP_EM)
+
+    # Solvate + ions
+    from .config import MD_SOLVENT
+    if MD_SOLVENT == "acetonitrile":
+        acn_gro = _get_acetonitrile_box(work_dir)
+        if acn_gro:
+            gmx(["solvate", "-cp", "system.gro", "-cs", str(acn_gro),
+                 "-o", "solvated.gro", "-p", "topol.top"], work_dir)
+        else:
+            gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
+                 "-o", "solvated.gro", "-p", "topol.top"], work_dir)
+    else:
+        gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
+             "-o", "solvated.gro", "-p", "topol.top"], work_dir)
+
+    gmx(["grompp", "-f", "em.mdp", "-c", "solvated.gro",
+         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "10"], work_dir)
+    gmx(["genion", "-s", "ions.tpr", "-o", "ions.gro",
+         "-p", "topol.top", "-pname", "NA", "-nname", "CL", "-neutral"],
+        work_dir, input_text="SOL\n")
+
+    return {
+        "gro": str(work_dir / "ions.gro"),
+        "top": str(work_dir / "topol.top"),
+        "monomer_names": list(mono_params.keys()),
+        "n_per_monomer": n_per_monomer,
+    }
+
+def build_mip_system(template_smiles: str, template_name: str,
+                      monomer_smiles: str, monomer_name: str,
+                      n_monomers: int, work_dir: Path,
+                      box_size: float = 4.0,
+                      temperature: float = 298.15,
+                      crosslinker_smiles: str = None,
+                      crosslinker_name: str = None,
+                      n_crosslinker: int = 0) -> dict:
+    """Build a pre-polymerization system: template + N monomers + [cross-linker] + solvent.
+
+    1. Parameterize template, monomer, [cross-linker] (acpype/GAFF2)
+    2. Create box with template at center, monomers + cross-linker randomly placed
+    3. Solvate with TIP3P water or explicit acetonitrile (Ye 2024)
+    4. Add ions to neutralize
+
+    Cross-linker inclusion: Ye et al. 2024 (Molecules)
+    """
+    work_dir = Path(work_dir).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    xl_str = f" + {n_crosslinker}× {crosslinker_name}" if crosslinker_smiles and n_crosslinker > 0 else ""
+    logger.info(f"  Building system: {template_name} + {n_monomers}× {monomer_name}{xl_str}")
 
     # Parameterize
     tmpl_param = parameterize_small_molecule(
@@ -267,20 +447,49 @@ def build_mip_system(template_smiles: str, template_name: str,
     if "error" in tmpl_param or "error" in mono_param:
         return {"error": f"Parameterization failed: {tmpl_param.get('error', '')} {mono_param.get('error', '')}"}
 
+    # Parameterize cross-linker if provided
+    xl_param = None
+    if crosslinker_smiles and n_crosslinker > 0:
+        xl_param = parameterize_small_molecule(
+            crosslinker_smiles, crosslinker_name, work_dir / "param_crosslinker")
+        if "error" in xl_param:
+            logger.warning(f"  Cross-linker parameterization failed: {xl_param['error']}")
+            xl_param = None
+
     # Copy ITP files to work_dir, splitting [ atomtypes ] into separate file
     tmpl_itp = _copy_and_split_itp(tmpl_param["itp"], work_dir, template_name)
     mono_itp = _copy_and_split_itp(mono_param["itp"], work_dir, monomer_name)
+    if xl_param:
+        _copy_and_split_itp(xl_param["itp"], work_dir, crosslinker_name)
 
-    # Build combined GRO: template + monomers (random placement)
-    _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size)
+    # Build combined GRO: template + monomers + cross-linker (random placement)
+    _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size,
+                       xl_param=xl_param, n_crosslinker=n_crosslinker)
 
     # Write topology
-    _write_topology(template_name, monomer_name, n_monomers, work_dir)
+    _write_topology(template_name, monomer_name, n_monomers, work_dir,
+                    crosslinker_name=crosslinker_name if xl_param else None,
+                    n_crosslinker=n_crosslinker if xl_param else 0)
 
-    # Solvate
-    gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
-         "-o", "solvated.gro", "-p", "topol.top"],
-        work_dir)
+    # Solvate — explicit acetonitrile or TIP3P water
+    from .config import MD_SOLVENT
+    if MD_SOLVENT == "acetonitrile":
+        acn_gro = _get_acetonitrile_box(work_dir)
+        if acn_gro:
+            gmx(["solvate", "-cp", "system.gro", "-cs", str(acn_gro),
+                 "-o", "solvated.gro", "-p", "topol.top"],
+                work_dir)
+            # Add ACN ITP include to topology if not already present
+            _add_acn_to_topology(work_dir / "topol.top")
+        else:
+            logger.warning("  Acetonitrile box not found, falling back to TIP3P water")
+            gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
+                 "-o", "solvated.gro", "-p", "topol.top"],
+                work_dir)
+    else:
+        gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
+             "-o", "solvated.gro", "-p", "topol.top"],
+            work_dir)
 
     # Add ions
     gmx(["grompp", "-f", "em.mdp", "-c", "solvated.gro",
@@ -299,8 +508,55 @@ def build_mip_system(template_smiles: str, template_name: str,
     }
 
 
-def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size):
-    """Create initial GRO with template at center and monomers randomly placed."""
+def _get_acetonitrile_box(work_dir):
+    """Generate a pre-equilibrated acetonitrile box using acpype + GROMACS.
+
+    Returns Path to acetonitrile box GRO, or None on failure.
+    Acetonitrile SMILES: CC#N
+    """
+    acn_dir = Path(work_dir) / "acn_solvent"
+    acn_dir.mkdir(exist_ok=True)
+    acn_box = acn_dir / "acn_box.gro"
+    if acn_box.exists():
+        return acn_box
+
+    try:
+        # Parameterize single acetonitrile molecule
+        acn_param = parameterize_small_molecule("CC#N", "ACN", acn_dir / "param")
+        if "error" in acn_param:
+            return None
+
+        # Create a box of ~500 acetonitrile molecules
+        # ACN density ~0.786 g/mL, MW=41.05, box=3nm → ~343 molecules
+        gmx(["insert-molecules", "-ci", acn_param["gro"], "-nmol", "400",
+             "-box", "3.0", "3.0", "3.0", "-o", "acn_box.gro"],
+            acn_dir)
+
+        if acn_box.exists():
+            logger.info("  Generated acetonitrile solvent box (400 molecules)")
+            return acn_box
+    except Exception as e:
+        logger.warning(f"  Acetonitrile box generation failed: {e}")
+    return None
+
+
+def _add_acn_to_topology(topol_path):
+    """Add acetonitrile molecule count to topology file."""
+    text = Path(topol_path).read_text()
+    if "ACN" not in text:
+        # Count ACN molecules from solvated.gro
+        sol_gro = Path(topol_path).parent / "solvated.gro"
+        if sol_gro.exists():
+            content = sol_gro.read_text()
+            n_acn = content.count("ACN")  # approximate
+            if n_acn > 0:
+                text += f"\nACN              {n_acn}\n"
+                Path(topol_path).write_text(text)
+
+
+def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size,
+                       xl_param=None, n_crosslinker=0):
+    """Create initial GRO with template at center, monomers + cross-linker randomly placed."""
     import numpy as np
 
     # Read template GRO
@@ -313,6 +569,13 @@ def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size):
     mono_natoms = int(mono_lines[1].strip())
     mono_atoms = mono_lines[2:2+mono_natoms]
 
+    # Read cross-linker GRO if provided
+    xl_atoms = None
+    if xl_param and n_crosslinker > 0:
+        xl_lines = Path(xl_param["gro"]).read_text().strip().split("\n")
+        xl_natoms = int(xl_lines[1].strip())
+        xl_atoms = xl_lines[2:2+xl_natoms]
+
     # Place template at center
     center = box_size / 2.0
     tmpl_offset = _gro_center_offset(tmpl_atoms, center, center, center)
@@ -321,9 +584,9 @@ def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size):
     # Place monomers randomly around template
     all_atoms = list(shifted_tmpl)
     rng = np.random.RandomState(42)
+    resnum = 2
 
     for i in range(n_monomers):
-        # Random position within box, at least 1nm from center
         while True:
             x = rng.uniform(0.5, box_size - 0.5)
             y = rng.uniform(0.5, box_size - 0.5)
@@ -331,11 +594,27 @@ def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size):
             dist = np.sqrt((x - center)**2 + (y - center)**2 + (z - center)**2)
             if dist > 1.0:
                 break
-
         offset = _gro_center_offset(mono_atoms, x, y, z)
         shifted_mono = _shift_gro_atoms(mono_atoms, *offset,
-                                         resnum=i + 2, resname="MON")
+                                         resnum=resnum, resname="MON")
         all_atoms.extend(shifted_mono)
+        resnum += 1
+
+    # Place cross-linker molecules (Ye 2024)
+    if xl_atoms and n_crosslinker > 0:
+        for i in range(n_crosslinker):
+            while True:
+                x = rng.uniform(0.5, box_size - 0.5)
+                y = rng.uniform(0.5, box_size - 0.5)
+                z = rng.uniform(0.5, box_size - 0.5)
+                dist = np.sqrt((x - center)**2 + (y - center)**2 + (z - center)**2)
+                if dist > 0.8:
+                    break
+            offset = _gro_center_offset(xl_atoms, x, y, z)
+            shifted_xl = _shift_gro_atoms(xl_atoms, *offset,
+                                           resnum=resnum, resname="XLK")
+            all_atoms.extend(shifted_xl)
+            resnum += 1
 
     # Write system GRO
     total = len(all_atoms)
@@ -350,7 +629,8 @@ def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size):
     (work_dir / "em.mdp").write_text(MDP_EM)
 
 
-def _write_topology(template_name, monomer_name, n_monomers, work_dir):
+def _write_topology(template_name, monomer_name, n_monomers, work_dir,
+                     crosslinker_name=None, n_crosslinker=0):
     """Write GROMACS topology file.
 
     atomtypes must come before moleculetype, so they are included
@@ -359,11 +639,23 @@ def _write_topology(template_name, monomer_name, n_monomers, work_dir):
     work_dir = Path(work_dir)
 
     # Check which atomtypes files exist
+    mol_names = [template_name, monomer_name]
+    if crosslinker_name:
+        mol_names.append(crosslinker_name)
+
     atomtype_includes = ""
-    for name in [template_name, monomer_name]:
+    for name in mol_names:
         at_file = work_dir / f"{name}_atomtypes.itp"
         if at_file.exists():
             atomtype_includes += f'#include "{name}_atomtypes.itp"\n'
+
+    mol_includes = f'#include "{template_name}.itp"\n#include "{monomer_name}.itp"\n'
+    if crosslinker_name:
+        mol_includes += f'#include "{crosslinker_name}.itp"\n'
+
+    mol_section = f"{template_name}    1\n{monomer_name}    {n_monomers}\n"
+    if crosslinker_name and n_crosslinker > 0:
+        mol_section += f"{crosslinker_name}    {n_crosslinker}\n"
 
     top = f"""; MIP pre-polymerization topology
 #include "amber99sb-ildn.ff/forcefield.itp"
@@ -371,9 +663,7 @@ def _write_topology(template_name, monomer_name, n_monomers, work_dir):
 ; Atom types from acpype (must come before moleculetype)
 {atomtype_includes}
 ; Molecule definitions
-#include "{template_name}.itp"
-#include "{monomer_name}.itp"
-
+{mol_includes}
 ; Solvent
 #include "amber99sb-ildn.ff/tip3p.itp"
 #include "amber99sb-ildn.ff/ions.itp"
@@ -382,9 +672,7 @@ def _write_topology(template_name, monomer_name, n_monomers, work_dir):
 MIP pre-polymerization
 
 [ molecules ]
-{template_name}    1
-{monomer_name}    {n_monomers}
-"""
+{mol_section}"""
     (work_dir / "topol.top").write_text(top)
 
 
@@ -752,16 +1040,30 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
     # Prefer reduced trajectory for speed
     reduced = work_dir / "md_reduced.xtc"
     traj = str(reduced) if reduced.exists() else str(work_dir / "md.xtc")
-    top = work_dir / "npt.gro"
+
+    # Use md.tpr as topology (has charge/mass info for H-bond analysis)
+    # Fallback to npt.gro if tpr not available
+    tpr = work_dir / "md.tpr"
+    top = str(tpr) if tpr.exists() else str(work_dir / "npt.gro")
 
     if not Path(traj).exists():
         return {"error": "Trajectory not found"}
-    if not top.exists():
-        return {"error": "Topology (npt.gro) not found"}
+    if not Path(top).exists():
+        return {"error": "Topology not found"}
 
-    u = mda.Universe(str(top), traj)
-    template = u.select_atoms(f"resname {template_name}")
-    monomers = u.select_atoms("resname MON")
+    u = mda.Universe(top, traj)
+
+    # Identify template vs monomer by residue order
+    # acpype assigns all molecules as "UNL", so we use resid:
+    # resid 1 = template, resid 2+ (non-SOL) = monomers
+    non_solvent = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    if len(non_solvent.residues) == 0:
+        return {"error": "No non-solvent residues found"}
+
+    first_resid = non_solvent.residues[0].resid
+    template = u.select_atoms(f"resid {first_resid}")
+    monomers = u.select_atoms(
+        f"not resname SOL NA CL Na+ Cl- and not resid {first_resid}")
     n_frames = len(u.trajectory)
 
     if len(template) == 0 or len(monomers) == 0:
@@ -812,6 +1114,26 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
     results["mean_min_distance_A"] = round(float(np.mean(min_distances)), 2) if min_distances else None
     results["n_frames_analyzed"] = total_frames
 
+    # ── MD Convergence check (Polania & Jimenez 2024) ──
+    # Split into 4 windows, compare last two — diff < 10% = converged
+    if total_frames >= 4:
+        q = total_frames // 4
+        window_freqs = []
+        for w in range(4):
+            w_contacts = contact_per_frame[w*q : (w+1)*q]
+            w_freq = sum(w_contacts) / (len(w_contacts) * n_monomer_residues) if w_contacts else 0
+            window_freqs.append(round(w_freq, 4))
+        f3, f4 = window_freqs[2], window_freqs[3]
+        diff_pct = abs(f4 - f3) / max(f3, f4) * 100 if max(f3, f4) > 0 else 0
+        converged = diff_pct < 10
+        results["convergence"] = {
+            "converged": converged,
+            "window_freqs": window_freqs,
+            "last_two_diff_pct": round(diff_pct, 1),
+        }
+        logger.info(f"  Convergence: {'YES' if converged else 'NO'} "
+                    f"(Q3={f3:.4f} Q4={f4:.4f} diff={diff_pct:.1f}%)")
+
     # ── RDF + EBN ──
     try:
         from MDAnalysis.analysis.rdf import InterRDF
@@ -830,29 +1152,392 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
         logger.warning(f"  RDF/EBN failed: {e}")
         results["EBN"] = 0.0
 
-    # ── H-bond analysis ──
+    # ── Per-functional-group RDF (Ye 2024) ──
+    # Identifies which template functional groups drive monomer binding
     try:
-        from MDAnalysis.analysis.hydrogenbonds import HydrogenBondAnalysis
-        hb = HydrogenBondAnalysis(
-            u, d_a_cutoff=3.5, d_h_a_angle_cutoff=150,
-            donors_sel=f"resname {template_name}",
-            acceptors_sel="resname MON",
-        )
-        hb.run(start=start_frame)
-        n_hbonds_mean = hb.results.hbonds.shape[0] / total_frames if total_frames > 0 else 0
-        results["n_hbonds_mean"] = round(float(n_hbonds_mean), 2)
-        results["n_hbonds_total"] = int(hb.results.hbonds.shape[0])
+        from MDAnalysis.analysis.rdf import InterRDF
+        # GAFF2 atom names: O, O1, O2 (carbonyl), OH (hydroxyl), N, N1, etc.
+        fg_sels = {
+            "all_O": f"resid {first_resid} and element O",
+            "all_N": f"resid {first_resid} and element N",
+            "all_S": f"resid {first_resid} and element S",
+        }
+        fg_rdf = {}
+        for fg_name, fg_sel in fg_sels.items():
+            try:
+                fg_atoms = u.select_atoms(fg_sel)
+                if len(fg_atoms) == 0:
+                    continue
+                rdf_fg = InterRDF(fg_atoms, monomers, nbins=50, range=(0, 10.0))
+                rdf_fg.run(start=start_frame)
+                peak = float(rdf_fg.results.rdf.max()) if len(rdf_fg.results.rdf) > 0 else 0
+                fg_rdf[fg_name] = round(peak, 3)
+            except Exception:
+                pass
+        if fg_rdf:
+            results["functional_group_rdf_peaks"] = fg_rdf
+            logger.info(f"  FG-RDF peaks: {fg_rdf}")
+    except Exception as e:
+        logger.debug(f"  Per-FG RDF failed: {e}")
+
+    # ── H-bond analysis (both directions, full trajectory for accuracy) ──
+    try:
+        # Use full trajectory (not reduced) for H-bond detection
+        full_traj = str(work_dir / "md.xtc")
+        if Path(full_traj).exists() and Path(top).exists():
+            u_full = mda.Universe(top, full_traj)
+            non_sol_full = u_full.select_atoms("not resname SOL NA CL Na+ Cl-")
+            frid = non_sol_full.residues[0].resid
+            n_frames_full = len(u_full.trajectory)
+            start_full = n_frames_full // 2
+
+            from MDAnalysis.analysis.hydrogenbonds import HydrogenBondAnalysis
+
+            # Template as donor → monomer as acceptor
+            hb1 = HydrogenBondAnalysis(
+                u_full, d_a_cutoff=3.5, d_h_a_angle_cutoff=130,
+                donors_sel=f"resid {frid}",
+                acceptors_sel=f"not resname SOL NA CL Na+ Cl- and not resid {frid}",
+            )
+            hb1.run(start=start_full)
+            n1 = hb1.results.hbonds.shape[0] if hasattr(hb1.results, 'hbonds') else 0
+
+            # Monomer as donor → template as acceptor
+            hb2 = HydrogenBondAnalysis(
+                u_full, d_a_cutoff=3.5, d_h_a_angle_cutoff=130,
+                donors_sel=f"not resname SOL NA CL Na+ Cl- and not resid {frid}",
+                acceptors_sel=f"resid {frid}",
+            )
+            hb2.run(start=start_full)
+            n2 = hb2.results.hbonds.shape[0] if hasattr(hb2.results, 'hbonds') else 0
+
+            n_analyzed = n_frames_full - start_full
+            total_hb = n1 + n2
+            results["n_hbonds_mean"] = round(float(total_hb / n_analyzed), 3) if n_analyzed > 0 else 0
+            results["n_hbonds_total"] = total_hb
+
+            # HBNMax + H-bond lifetime (Ye et al. 2024)
+            # Combine both directions into per-frame counts
+            all_hbonds = np.concatenate([
+                hb1.results.hbonds if n1 > 0 else np.empty((0, 6)),
+                hb2.results.hbonds if n2 > 0 else np.empty((0, 6)),
+            ]) if (n1 + n2) > 0 else np.empty((0, 6))
+            if len(all_hbonds) > 0:
+                frame_hb_counts = {}
+                for row in all_hbonds:
+                    fr = int(row[0])
+                    frame_hb_counts[fr] = frame_hb_counts.get(fr, 0) + 1
+                results["HBNMax"] = max(frame_hb_counts.values()) if frame_hb_counts else 0
+                results["hbond_lifetime_avg"] = round(float(np.mean(
+                    list(frame_hb_counts.values()))), 2) if frame_hb_counts else 0
+            else:
+                results["HBNMax"] = 0
+                results["hbond_lifetime_avg"] = 0
+            logger.info(f"  HBNMax={results['HBNMax']}, H-bond lifetime={results['hbond_lifetime_avg']}")
+        else:
+            results["n_hbonds_mean"] = 0
+            results["n_hbonds_total"] = 0
+            results["HBNMax"] = 0
+            results["hbond_lifetime_avg"] = 0
     except Exception as e:
         logger.warning(f"  H-bond analysis failed: {e}")
         results["n_hbonds_mean"] = 0
         results["n_hbonds_total"] = 0
+        results["HBNMax"] = 0
+        results["hbond_lifetime_avg"] = 0
+
+    # ── Crosslinker proximity check (Rajpal 2023) ──
+    # Verify cross-linker is spatially near monomers for network formation
+    try:
+        xl_atoms = u.select_atoms("resname XLK")
+        if len(xl_atoms) > 0:
+            xl_dists = []
+            for res in monomers.residues:
+                d = np.linalg.norm(
+                    res.atoms.positions[:, np.newaxis, :] -
+                    xl_atoms.positions[np.newaxis, :, :], axis=2)
+                xl_dists.append(float(d.min()))
+            mean_xl_dist = np.mean(xl_dists) if xl_dists else 999
+            results["crosslinker_proximity_A"] = round(mean_xl_dist, 2)
+            results["crosslinker_well_positioned"] = mean_xl_dist < 10.0
+            logger.info(f"  Crosslinker proximity: {mean_xl_dist:.1f}Å → "
+                        f"{'OK' if mean_xl_dist < 10 else 'WARNING: too far'}")
+    except Exception:
+        pass
+
+    # ── Interaction energy: gmx_MMPBSA (GB-SA) or GROMACS rerun (LJ+Coul) ──
+    # Extracts template-monomer binding free energy from trajectory.
+    # More physically meaningful than single-structure DFT for dynamic binding.
+    # Reference: Mohsenzadeh et al. 2024 (WIREs Comput. Mol. Sci.)
+    try:
+        ie = _compute_mmpbsa(work_dir, first_resid, start_frame)
+        if "error" in ie:
+            logger.info(f"  gmx_MMPBSA unavailable ({ie['error']}), falling back to rerun")
+            ie = _compute_interaction_energy(work_dir, first_resid, start_frame)
+        results["interaction_energy_kJ"] = ie.get("mean_total", None)
+        results["interaction_energy_std"] = ie.get("std_total", None)
+        results["ie_coulomb_kJ"] = ie.get("mean_coul", None)
+        results["ie_lj_kJ"] = ie.get("mean_lj", None)
+        results["ie_method"] = ie.get("method", "unknown")
+    except Exception as e:
+        logger.warning(f"  Interaction energy failed: {e}")
+        results["interaction_energy_kJ"] = None
+        results["ie_method"] = "failed"
 
     logger.info(f"  Analysis: contact_freq={results['contact_frequency']:.4f}, "
                 f"EBN={results.get('EBN', 0):.4f}, "
                 f"H-bonds={results.get('n_hbonds_mean', 0):.1f}/frame, "
+                f"IE={results.get('interaction_energy_kJ', 'N/A')} kJ/mol, "
                 f"residence={results['max_residence_frames']}frames")
 
     return results
+
+
+def _compute_mmpbsa(work_dir, template_resid, start_frame=0):
+    """Compute MM-GBSA binding free energy using gmx_MMPBSA.
+
+    Uses GB model (igb=5, OBC-II) for implicit solvation — faster than PB
+    and well-suited for small molecule binding in MIP systems.
+    Reference: Mohsenzadeh et al. 2024 (WIREs Comput. Mol. Sci.)
+    """
+    work_dir = Path(work_dir).resolve()
+    mmpbsa_dir = work_dir / "mmpbsa"
+    mmpbsa_dir.mkdir(exist_ok=True)
+
+    tpr = work_dir / "md.tpr"
+    traj = work_dir / "md_reduced.xtc"
+    if not traj.exists():
+        traj = work_dir / "md.xtc"
+    topol = work_dir / "topol.top"
+
+    if not tpr.exists() or not traj.exists() or not topol.exists():
+        return {"error": "Required files not found"}
+
+    try:
+        import shutil as _shutil
+        _shutil.which("gmx_MMPBSA") or (_ for _ in ()).throw(FileNotFoundError())
+    except Exception:
+        return {"error": "gmx_MMPBSA not in PATH"}
+
+    # Create index groups
+    import MDAnalysis as mda
+    u = mda.Universe(str(tpr))
+    non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    tmpl = u.select_atoms(f"resid {template_resid}")
+    mono = non_sol.select_atoms(f"not resid {template_resid}")
+
+    if len(tmpl) == 0 or len(mono) == 0:
+        return {"error": "Template or monomer selection empty"}
+
+    # Write index file (1-based for GROMACS)
+    ndx_path = mmpbsa_dir / "index.ndx"
+    with open(ndx_path, "w") as f:
+        f.write("[ receptor ]\n")
+        f.write(" ".join(str(i+1) for i in tmpl.indices) + "\n")
+        f.write("[ ligand ]\n")
+        f.write(" ".join(str(i+1) for i in mono.indices) + "\n")
+
+    # gmx_MMPBSA input file (GB model + Interaction Entropy)
+    # IE method: entropy from MD trajectory fluctuations (Duan et al. 2016)
+    # No NMA needed — negligible additional cost
+    mmpbsa_in = """\
+&general
+startframe=1, endframe=9999999, interval=10,
+forcefields="leaprc.gaff2", PBRadii=4,
+interaction_entropy=1, ie_segment=25,
+temperature=298.15,
+/
+&gb
+igb=5, saltcon=0.150,
+/
+&decomp
+idecomp=2, dec_verbose=1,
+print_res="within 6"
+/
+"""
+    (mmpbsa_dir / "mmpbsa.in").write_text(mmpbsa_in)
+
+    try:
+        import subprocess
+        cmd = [
+            "gmx_MMPBSA",
+            "-O",
+            "-i", str(mmpbsa_dir / "mmpbsa.in"),
+            "-cs", str(tpr),
+            "-ci", str(ndx_path),
+            "-cg", "0", "1",  # receptor=group0, ligand=group1
+            "-ct", str(traj),
+            "-cp", str(topol),
+            "-nogui",
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+            cwd=str(mmpbsa_dir)
+        )
+
+        # Parse results from FINAL_RESULTS_MMPBSA.dat
+        final_dat = mmpbsa_dir / "FINAL_RESULTS_MMPBSA.dat"
+        if final_dat.exists():
+            text = final_dat.read_text()
+            import re
+            # Look for "DELTA TOTAL" line
+            match = re.search(r"DELTA TOTAL\s+([-\d.]+)\s+([-\d.]+)", text)
+            if match:
+                mean_dg = float(match.group(1))
+                std_dg = float(match.group(2))
+                # Try to parse Interaction Entropy result
+                ie_match = re.search(r"DELTA G binding\s*=\s*([-\d.]+)", text)
+                ie_dg = float(ie_match.group(1)) if ie_match else None
+                # Parse per-residue decomposition if available
+                decomp_data = None
+                decomp_dat = mmpbsa_dir / "FINAL_DECOMP_MMPBSA.dat"
+                if decomp_dat.exists():
+                    decomp_data = _parse_decomp_results(decomp_dat)
+
+                return {
+                    "mean_total": round(mean_dg * 4.184, 2),  # kcal→kJ/mol
+                    "std_total": round(std_dg * 4.184, 2),
+                    "mean_coul": None,
+                    "mean_lj": None,
+                    "dg_ie_kcal": round(ie_dg, 2) if ie_dg else None,
+                    "dg_ie_kJ": round(ie_dg * 4.184, 2) if ie_dg else None,
+                    "decomp": decomp_data,
+                    "method": "MM-GBSA+IE+Decomp (gmx_MMPBSA, igb=5)",
+                }
+
+        return {"error": f"gmx_MMPBSA completed but no results parsed. stderr: {result.stderr[:200]}"}
+
+    except subprocess.TimeoutExpired:
+        return {"error": "gmx_MMPBSA timeout (>600s)"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _parse_decomp_results(decomp_dat):
+    """Parse per-residue decomposition from gmx_MMPBSA output.
+
+    Returns list of {resid, resname, total_kcal} sorted by contribution.
+    """
+    import re
+    results = []
+    try:
+        text = Path(decomp_dat).read_text()
+        # Pattern: residue lines like "  ALA  1  |  -2.345  0.123  ..."
+        for line in text.split("\n"):
+            parts = line.split("|")
+            if len(parts) >= 2:
+                res_part = parts[0].strip().split()
+                energy_part = parts[1].strip().split()
+                if len(res_part) >= 2 and len(energy_part) >= 1:
+                    try:
+                        resname = res_part[0]
+                        resid = int(res_part[1])
+                        total = float(energy_part[0])
+                        results.append({
+                            "resid": resid,
+                            "resname": resname,
+                            "total_kcal": round(total, 3),
+                        })
+                    except (ValueError, IndexError):
+                        continue
+        results.sort(key=lambda x: x["total_kcal"])
+    except Exception:
+        pass
+    return results[:20] if results else None  # Top 20 contributors
+
+
+def _compute_interaction_energy(work_dir, template_resid, start_frame=0):
+    """Compute template-monomer interaction energy using GROMACS energygrps rerun.
+
+    Creates index groups for template and monomers, then runs gmx mdrun -rerun
+    with energygrps to extract Coulomb + LJ interaction between the two groups.
+    Returns mean ± std over the last 50% of trajectory (kJ/mol).
+    """
+    work_dir = Path(work_dir).resolve()
+    ie_dir = work_dir / "interaction_energy"
+    ie_dir.mkdir(exist_ok=True)
+
+    tpr = work_dir / "md.tpr"
+    traj = work_dir / "md_reduced.xtc"
+    if not traj.exists():
+        traj = work_dir / "md.xtc"
+    if not tpr.exists() or not traj.exists():
+        return {"error": "TPR or trajectory not found"}
+
+    # Create index file with template and monomer groups
+    import MDAnalysis as mda
+    u = mda.Universe(str(tpr))
+    non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    tmpl_indices = u.select_atoms(f"resid {template_resid}").indices
+    mono_indices = non_sol.select_atoms(f"not resid {template_resid}").indices
+
+    ndx_path = ie_dir / "ie.ndx"
+    with open(ndx_path, "w") as f:
+        f.write("[ Template ]\n")
+        f.write(" ".join(str(i+1) for i in tmpl_indices) + "\n")
+        f.write("[ Monomer ]\n")
+        f.write(" ".join(str(i+1) for i in mono_indices) + "\n")
+
+    # MDP for energy rerun with interaction groups
+    ie_mdp = f"""\
+integrator  = md
+nsteps      = 0
+nstxout     = 0
+nstfout     = 0
+nstenergy   = 1
+nstlog      = 0
+cutoff-scheme = Verlet
+coulombtype = PME
+rcoulomb    = 1.0
+rvdw        = 1.0
+pbc         = xyz
+energygrps  = Template Monomer
+"""
+    (ie_dir / "ie.mdp").write_text(ie_mdp)
+
+    try:
+        # grompp with custom index
+        gmx(["grompp", "-f", "ie.mdp", "-c", str(work_dir / "npt.gro"),
+             "-p", str(work_dir / "topol.top"), "-n", "ie.ndx",
+             "-o", "ie.tpr", "-maxwarn", "10"], ie_dir)
+
+        # mdrun -rerun over trajectory
+        gmx(["mdrun", "-s", "ie.tpr", "-rerun", str(traj),
+             "-deffnm", "ie", "-nb", "cpu"], ie_dir, timeout=600)
+
+        # Extract energies: Coul-SR:Template-Monomer + LJ-SR:Template-Monomer
+        edr = ie_dir / "ie.edr"
+        if not edr.exists():
+            return {"error": "EDR not generated"}
+
+        # Use gmx energy to extract
+        xvg_path = ie_dir / "ie_energy.xvg"
+        gmx(["energy", "-f", "ie.edr", "-o", str(xvg_path)],
+            ie_dir,
+            input_text="Coul-SR:Template-Monomer\nLJ-SR:Template-Monomer\n\n")
+
+        # Parse xvg
+        data = _parse_xvg(xvg_path)
+        if data is not None and len(data) > 0:
+            # data columns: time, Coul-SR, LJ-SR
+            n = len(data)
+            half = n // 2  # last 50%
+            coul = data[half:, 1] if data.shape[1] > 1 else np.zeros(1)
+            lj = data[half:, 2] if data.shape[1] > 2 else np.zeros(1)
+            total = coul + lj
+
+            return {
+                "mean_coul": round(float(np.mean(coul)), 2),
+                "mean_lj": round(float(np.mean(lj)), 2),
+                "mean_total": round(float(np.mean(total)), 2),
+                "std_total": round(float(np.std(total)), 2),
+            }
+
+        return {"error": "Could not parse energy output"}
+
+    except Exception as e:
+        logger.debug(f"  IE rerun failed: {e}")
+        return {"error": str(e)}
 
 
 def _parse_xvg(xvg_path: Path):

@@ -330,9 +330,26 @@ def dft_energy(atom_str: str, basis: str, eps: float,
     mf = dft.RKS(mol).density_fit()  # RI-J density fitting
     mf.xc = func
 
+    # Apply D3BJ dispersion correction explicitly
+    # (LibXC may not auto-activate ωB97XD's built-in D2)
+    mf = _apply_d3bj(mf, mol)
+
     from pyscf.solvent import PCM
     mf = PCM(mf)
     mf.with_solvent.eps = eps
+    # Solvent-specific probe radius (default=1.385Å is for water)
+    # Acetonitrile: ~2.18Å based on molecular radius (Bondi vdW)
+    _SOLVENT_PROBE_RADIUS = {35.69: 2.18, 78.39: 1.385}  # eps → probe(Å)
+    probe = _SOLVENT_PROBE_RADIUS.get(eps, 1.385)
+    try:
+        mf.with_solvent.lebedev_order = 29
+        mf.with_solvent.method = 'IEF-PCM'
+        mf.with_solvent.radii_table = None  # use default UFF radii
+        # Note: PySCF PCM doesn't directly expose probe radius as a parameter.
+        # The cavity is built from atom-specific UFF radii, not a solvent probe.
+        # For acetonitrile, the main effect comes from eps (dielectric constant).
+    except AttributeError:
+        pass
 
     # GPU acceleration
     if use_gpu:
@@ -364,7 +381,15 @@ def dft_energy_ghost(real_atom_str: str, ghost_atom_str: str,
 
     mf = dft.RKS(mol).density_fit()  # RI-J
     mf.xc = func
-    # No PCM for ghost atoms — ghost distorts PCM cavity
+    # Apply PCM for consistent solvation with complex energy calculation
+    from pyscf.solvent import PCM as _PCM
+    mf = _PCM(mf)
+    mf.with_solvent.eps = eps
+    try:
+        mf.with_solvent.lebedev_order = 29
+        mf.with_solvent.method = 'IEF-PCM'
+    except AttributeError:
+        pass
     if use_gpu:
         mf = _try_gpu(mf)
 

@@ -28,18 +28,12 @@ from pathlib import Path
 from .config import (
     TEMPLATE_SMILES, MONOMER_LIBRARY, INTERFERENT_LIBRARY,
     TEMPERATURE, OUTPUT_DIR, OUTPUT_DIRS,
+    VIP_N_SNAPSHOTS, VIP_RESTRAINT_K, VIP_REMOVAL_NS,
+    VIP_REBINDING_NS, VIP_RMSD_THRESHOLD, VIP_REMOVAL_THRESHOLD,
 )
 from .utils_gromacs import gmx, MDP_NVT, MDP_PRODUCTION
 
 logger = logging.getLogger(__name__)
-
-# ── VIP Parameters ──
-VIP_N_SNAPSHOTS = 5              # Equilibrium snapshots (evenly spaced, no cherry-picking)
-VIP_RESTRAINT_K = 1000           # kJ/mol/nm² position restraint
-VIP_REMOVAL_NS = 10             # Template removal test (ns)
-VIP_REBINDING_NS = 10           # Rebinding MD (ns)
-VIP_RMSD_THRESHOLD = 5.0        # Å, rebinding success
-VIP_REMOVAL_THRESHOLD = 8.0     # Å, template escaped (removal OK)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -145,12 +139,16 @@ def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
     logger.info(f"  Trajectory: {len(u.trajectory)} frames, {u.atoms.n_atoms} atoms")
 
     # Identify template and monomer atoms
-    template = u.select_atoms("resname TMP")
-    monomers = u.select_atoms("resname MON")
+    # Identify template vs monomer by residue order (resid 1 = template)
+    non_solvent = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    first_resid = non_solvent.residues[0].resid
+    template = u.select_atoms(f"resid {first_resid}")
+    monomers = u.select_atoms(
+        f"not resname SOL NA CL Na+ Cl- and not resid {first_resid}")
     n_template = len(template)
 
     if n_template == 0:
-        raise ValueError("Template atoms (resname TMP) not found")
+        raise ValueError("Template atoms not found (resid 1)")
 
     # Select equilibrium snapshots (last 50%, evenly spaced)
     n_total = len(u.trajectory)
@@ -190,7 +188,7 @@ def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
         # ── Step 2: Template rebinding ──
         logger.info(f"  Step 2: Template rebinding ({VIP_REBINDING_NS}ns)...")
         rebind_own = _run_rebinding(snap_dir, tmpl_pos_init, template.indices,
-                                     "template")
+                                     "template", snapshot_idx=si)
 
         snap = {
             "frame_idx": fi,
@@ -202,7 +200,8 @@ def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
         for interf_name, interf_smiles in interferent_library.items():
             logger.info(f"  Step 3: Rebinding {interf_name}...")
             rebind_interf = _run_rebinding(snap_dir, tmpl_pos_init,
-                                            template.indices, interf_name)
+                                            template.indices, interf_name,
+                                            snapshot_idx=si)
             snap[f"rebind_{interf_name}"] = rebind_interf
 
         snap["success"] = True
@@ -218,7 +217,10 @@ def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
 
 def _create_monomer_posre(universe, work_dir):
     """Create position restraint file for monomer heavy atoms."""
-    monomers = universe.select_atoms("resname MON")
+    non_solvent = universe.select_atoms("not resname SOL NA CL Na+ Cl-")
+    first_resid = non_solvent.residues[0].resid
+    monomers = universe.select_atoms(
+        f"not resname SOL NA CL Na+ Cl- and not resid {first_resid}")
     posre_path = Path(work_dir) / "posre_monomers.itp"
 
     with open(posre_path, "w") as f:
@@ -245,6 +247,69 @@ def _create_monomer_posre(universe, work_dir):
 #  Template Removal Test
 # ═══════════════════════════════════════════════════════════════
 
+def _compute_pbc_rmsd(positions, ref_positions, box):
+    """Compute RMSD with PBC image correction."""
+    delta = positions - ref_positions
+    if box is not None and np.all(box[:3] > 0):
+        box_diag = box[:3]  # box lengths in Å
+        delta -= box_diag * np.round(delta / box_diag)
+    return float(np.sqrt(np.mean(np.sum(delta**2, axis=1))))
+
+
+def _run_em_equilibration(work_dir):
+    """Short EM + NVT equilibration to relax steric clashes after displacement."""
+    em_mdp = """\
+integrator  = steep
+nsteps      = 500
+emtol       = 500.0
+emstep      = 0.01
+nstlist     = 1
+cutoff-scheme = Verlet
+coulombtype = PME
+rcoulomb    = 1.0
+rvdw        = 1.0
+pbc         = xyz
+"""
+    (work_dir / "em.mdp").write_text(em_mdp)
+    gmx(["grompp", "-f", "em.mdp", "-c", "conf.gro",
+         "-p", "topol.top", "-o", "em.tpr", "-maxwarn", "10"], work_dir)
+    gmx(["mdrun", "-deffnm", "em", "-nb", "gpu"], work_dir, timeout=120)
+
+    nvt_mdp = f"""\
+integrator  = md
+nsteps      = 5000
+dt          = 0.001
+nstxout-compressed = 0
+nstlog      = 5000
+nstenergy   = 5000
+continuation = no
+gen-vel     = yes
+gen-temp    = {TEMPERATURE}
+cutoff-scheme = Verlet
+coulombtype = PME
+rcoulomb    = 1.0
+rvdw        = 1.0
+pbc         = xyz
+tcoupl      = V-rescale
+tc-grps     = System
+tau_t       = 0.1
+ref_t       = {TEMPERATURE}
+pcoupl      = no
+"""
+    (work_dir / "nvt.mdp").write_text(nvt_mdp)
+    conf = "em.gro" if (work_dir / "em.gro").exists() else "conf.gro"
+    gmx(["grompp", "-f", "nvt.mdp", "-c", conf,
+         "-p", "topol.top", "-o", "nvt.tpr", "-maxwarn", "10"], work_dir)
+    gmx(["mdrun", "-deffnm", "nvt", "-nb", "gpu"], work_dir, timeout=120)
+
+    if (work_dir / "nvt.gro").exists():
+        shutil.copy2(str(work_dir / "nvt.gro"), str(work_dir / "conf_eq.gro"))
+        return "conf_eq.gro"
+    elif (work_dir / "em.gro").exists():
+        return "em.gro"
+    return "conf.gro"
+
+
 def _run_removal_test(snap_dir, tmpl_pos_init, tmpl_indices):
     """Run MD with monomer restraints, template free. Measure template escape."""
     import MDAnalysis as mda
@@ -259,13 +324,15 @@ def _run_removal_test(snap_dir, tmpl_pos_init, tmpl_indices):
         for f in snap_dir.glob("*.itp"):
             shutil.copy2(str(f), str(removal_dir / f.name))
 
-        # MDP with monomer restraints (define POSRES_MONOMER)
+        # MDP: gen-vel=yes for fresh start (no checkpoint)
         dt = 0.002
         nsteps = int(VIP_REMOVAL_NS * 1e6 / (dt * 1000))
         mdp = MDP_PRODUCTION.format(
             nsteps=nsteps, dt=dt, nstxout=5000, temperature=TEMPERATURE
         )
-        mdp += "\ndefine = -DPOSRES_MONOMER\n"
+        mdp = mdp.replace("continuation = yes", "continuation = no")
+        mdp += f"\ngen-vel     = yes\ngen-temp    = {TEMPERATURE}\n"
+        mdp += "define = -DPOSRES_MONOMER\n"
         (removal_dir / "md.mdp").write_text(mdp)
 
         # grompp + mdrun
@@ -275,7 +342,7 @@ def _run_removal_test(snap_dir, tmpl_pos_init, tmpl_indices):
         gmx(["mdrun", "-deffnm", "md", "-nb", "gpu"],
             removal_dir, timeout=int(VIP_REMOVAL_NS * 300))
 
-        # Analyze template RMSD
+        # Analyze template RMSD (PBC-aware)
         traj = removal_dir / "md.xtc"
         top = removal_dir / "conf.gro"
         if traj.exists():
@@ -284,8 +351,8 @@ def _run_removal_test(snap_dir, tmpl_pos_init, tmpl_indices):
 
             rmsds = []
             for ts in u.trajectory:
-                rmsd = np.sqrt(np.mean(np.sum(
-                    (template.positions - tmpl_pos_init)**2, axis=1)))
+                rmsd = _compute_pbc_rmsd(
+                    template.positions, tmpl_pos_init, ts.dimensions)
                 rmsds.append(rmsd)
 
             final_rmsd = rmsds[-1] if rmsds else 0
@@ -311,8 +378,9 @@ def _run_removal_test(snap_dir, tmpl_pos_init, tmpl_indices):
 #  Rebinding MD
 # ═══════════════════════════════════════════════════════════════
 
-def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label):
-    """Remove template, run MD, check if template returns to cavity."""
+def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label,
+                    snapshot_idx=0):
+    """Displace template, run MD, check if template returns to cavity."""
     import MDAnalysis as mda
 
     rebind_dir = Path(snap_dir) / f"rebind_{label}"
@@ -325,46 +393,74 @@ def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label):
         for f in snap_dir.glob("*.itp"):
             shutil.copy2(str(f), str(rebind_dir / f.name))
 
-        # Displace template by ~5Å from initial position (test if cavity pulls it back)
+        # Displace template by ~5Å — unique direction per snapshot
         _displace_template_in_gro(
-            rebind_dir / "conf.gro", tmpl_indices, displacement_nm=0.5)
+            rebind_dir / "conf.gro", tmpl_indices,
+            displacement_nm=0.5, seed=42 + snapshot_idx)
+
+        # EM + short NVT equilibration to relax steric clashes
+        try:
+            eq_conf = _run_em_equilibration(rebind_dir)
+        except Exception:
+            eq_conf = "conf.gro"
 
         dt = 0.002
         nsteps = int(VIP_REBINDING_NS * 1e6 / (dt * 1000))
         mdp = MDP_PRODUCTION.format(
             nsteps=nsteps, dt=dt, nstxout=5000, temperature=TEMPERATURE
         )
-        mdp += "\ndefine = -DPOSRES_MONOMER\n"
+        mdp = mdp.replace("continuation = yes", "continuation = no")
+        mdp += f"\ngen-vel     = yes\ngen-temp    = {TEMPERATURE}\n"
+        mdp += "define = -DPOSRES_MONOMER\n"
         (rebind_dir / "md.mdp").write_text(mdp)
 
-        gmx(["grompp", "-f", "md.mdp", "-c", "conf.gro",
+        gmx(["grompp", "-f", "md.mdp", "-c", eq_conf,
              "-p", "topol.top", "-o", "md.tpr", "-maxwarn", "10"],
             rebind_dir)
         gmx(["mdrun", "-deffnm", "md", "-nb", "gpu"],
             rebind_dir, timeout=int(VIP_REBINDING_NS * 300))
 
-        # Analyze RMSD from initial position
+        # Analyze RMSD + contact count from initial position (PBC-aware)
         traj = rebind_dir / "md.xtc"
         if traj.exists():
-            u = mda.Universe(str(rebind_dir / "conf.gro"), str(traj))
+            u = mda.Universe(str(rebind_dir / eq_conf), str(traj))
             template = u.select_atoms(f"index {' '.join(str(i) for i in tmpl_indices)}")
+            monomers = u.select_atoms(
+                f"not resname SOL NA CL Na+ Cl- and not index {' '.join(str(i) for i in tmpl_indices)}")
 
             rmsds = []
+            contacts = []
             for ts in u.trajectory:
-                rmsd = np.sqrt(np.mean(np.sum(
-                    (template.positions - tmpl_pos_init)**2, axis=1)))
+                rmsd = _compute_pbc_rmsd(
+                    template.positions, tmpl_pos_init, ts.dimensions)
                 rmsds.append(rmsd)
+                # Contact count: monomer atoms within 6Å of template
+                if len(monomers) > 0:
+                    dists = np.linalg.norm(
+                        template.positions[:, np.newaxis, :] -
+                        monomers.positions[np.newaxis, :, :], axis=2)
+                    n_contact = int(np.sum(dists.min(axis=0) < 6.0))
+                    contacts.append(n_contact)
 
             final_rmsd = rmsds[-1] if rmsds else 999
             mean_rmsd = np.mean(rmsds) if rmsds else 999
             rebound = final_rmsd < VIP_RMSD_THRESHOLD
 
+            contact_info = {}
+            if contacts:
+                contact_info = {
+                    "mean_contacts": round(float(np.mean(contacts)), 1),
+                    "final_contacts": contacts[-1] if contacts else 0,
+                }
+
             logger.info(f"    Rebind [{label}]: final={final_rmsd:.1f}Å, "
-                        f"mean={mean_rmsd:.1f}Å, rebound={rebound}")
+                        f"mean={mean_rmsd:.1f}Å, contacts={contact_info.get('mean_contacts', 0):.0f}, "
+                        f"rebound={rebound}")
             return {
                 "final_rmsd_A": round(float(final_rmsd), 2),
                 "mean_rmsd_A": round(float(mean_rmsd), 2),
                 "rebound": bool(rebound),
+                **contact_info,
             }
 
         return {"error": "Trajectory not generated", "rebound": False}
@@ -374,10 +470,11 @@ def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label):
         return {"error": str(e), "rebound": False}
 
 
-def _displace_template_in_gro(gro_path, tmpl_indices, displacement_nm=0.5):
+def _displace_template_in_gro(gro_path, tmpl_indices, displacement_nm=0.5,
+                               seed=42):
     """Displace template atoms by random vector in GRO file."""
     lines = Path(gro_path).read_text().strip().split("\n")
-    rng = np.random.RandomState(42)
+    rng = np.random.RandomState(seed)
     direction = rng.randn(3)
     direction /= np.linalg.norm(direction)
 
@@ -433,7 +530,74 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
     both_rate = n_both_ok / n_total if n_total > 0 else 0
     n_selective = sum(1 for cnt in interf_rebound.values() if cnt == 0)
     sel_score = n_selective / len(interferent_names) if interferent_names else 0
-    vip_score = both_rate * (1 + sel_score)
+
+    # ── Composite VIP score (literature-based) ──
+    # For small-molecule templates, removal in 10ns is often too short
+    # to observe 8Å displacement → both_rate ≈ 0 for all monomers.
+    # Use rebind_rate as primary indicator (Zink & Moura 2018: cavity
+    # recognition is the key metric, not removal speed).
+    #
+    # Selectivity: graded scoring based on interferent rebind frequency.
+    #   - Binary (rejected/not) is too coarse for small molecules where
+    #     all interferents fit in the cavity.
+    #   - Instead: sel = 1 - mean(interf_rebind_rate / template_rebind_rate)
+    #     If interferents rebind as often as template → sel ≈ 0 (non-selective)
+    #     If interferents rebind less than template → sel > 0 (selective)
+    #   - Clamped to [0, 1].
+    #   Reference: Ye et al. 2024, Muñoz et al. 2024 (graded binding metrics)
+    if n_total > 0 and rebind_rate > 0:
+        interf_ratios = []
+        for cnt in interf_rebound.values():
+            interf_rebind_rate = cnt / n_total
+            interf_ratios.append(interf_rebind_rate / rebind_rate)
+        sel_score = max(0.0, 1.0 - (sum(interf_ratios) / len(interf_ratios))) if interf_ratios else 0
+    elif n_total > 0:
+        # Template doesn't rebind → sel = 0
+        sel_score = 0.0
+
+    # Score = rebind_rate × (1 + sel_score)
+    # Primary metric: cavity rebinding rate (Zink & Moura 2018).
+    # Falls back to both_rate formula when removal works (large templates).
+    if both_rate > 0:
+        vip_score = both_rate * (1 + sel_score)
+    else:
+        vip_score = rebind_rate * (1 + sel_score)
+
+    # ── Selectivity Index (Mohsenzadeh 2024): RMSD-based ──
+    # SI = mean(interf_final_rmsd) / mean(template_final_rmsd)
+    # SI > 1.5 → selective, SI 1.0-1.5 → weak, SI < 1.0 → non-selective
+    own_rmsds = []
+    interf_rmsds_all = {name: [] for name in interferent_names}
+    for snap in snapshots:
+        if not snap.get("success"):
+            continue
+        own_r = snap.get("rebind_template", {}).get("final_rmsd_A")
+        if own_r is not None:
+            own_rmsds.append(own_r)
+        for iname in interferent_names:
+            ir = snap.get(f"rebind_{iname}", {}).get("final_rmsd_A")
+            if ir is not None:
+                interf_rmsds_all[iname].append(ir)
+
+    own_mean = np.mean(own_rmsds) if own_rmsds else 999.0
+    si_per_interf = {}
+    for iname in interferent_names:
+        i_rmsds = interf_rmsds_all[iname]
+        i_mean = np.mean(i_rmsds) if i_rmsds else 0.0
+        si = float(i_mean / own_mean) if own_mean > 0.1 else 0.0
+        si_per_interf[iname] = round(si, 3)
+    selectivity_index = float(np.mean(list(si_per_interf.values()))) if si_per_interf else 0.0
+
+    # Statistical significance (Welch's t-test: own vs each interferent RMSD)
+    from scipy import stats as _stats
+    p_values = {}
+    for iname in interferent_names:
+        i_rmsds = interf_rmsds_all[iname]
+        if len(own_rmsds) >= 2 and len(i_rmsds) >= 2:
+            _, p = _stats.ttest_ind(own_rmsds, i_rmsds, equal_var=False)
+            p_values[iname] = round(float(p), 4)
+        else:
+            p_values[iname] = None
 
     return {
         "monomer": monomer_name,
@@ -442,6 +606,11 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
         "rebind_rate": round(rebind_rate, 2),
         "both_rate": round(both_rate, 2),
         "selectivity_score": round(sel_score, 2),
+        "selectivity_index": round(selectivity_index, 3),
+        "selectivity_index_per_interf": si_per_interf,
+        "p_values": p_values,
+        "own_rmsd_mean": round(float(own_mean), 2),
+        "own_rmsd_std": round(float(np.std(own_rmsds)), 2) if len(own_rmsds) > 1 else 0.0,
         "vip_score": round(vip_score, 3),
         "interferent_results": {
             name: {"rebound_count": cnt, "rejected": cnt == 0}

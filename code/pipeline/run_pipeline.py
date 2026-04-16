@@ -213,7 +213,7 @@ def print_summary(output_dir: str):
 
         avg_sel = selectivity_data.get(name, float("nan"))
         ebn = md_data.get(name, {}).get("EBN", float("nan"))
-        n_hb = md_data.get(name, {}).get("n_hbonds_stable", "N/A")
+        n_hb = md_data.get(name, {}).get("n_hbonds_mean", md_data.get(name, {}).get("n_hbonds_stable", "N/A"))
         opt_ratio = md_data.get(name, {}).get("optimal_ratio", "")
 
         line = f"{i:<6}{name:<12}{avg_be:<+20.3f}{avg_sel:<14.3f}{ebn:<10.3f}{str(n_hb):<10}"

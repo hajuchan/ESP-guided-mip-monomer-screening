@@ -45,27 +45,68 @@ LITERATURE_DATA = [
 
 # ── Feature Engineering ─────────────────────────────────────────────
 
-def _build_features(bsse_dE: float, solvent_eps: float) -> np.ndarray:
-    """Build feature vector: [bsse_dE, solvent_eps, bsse_dE * solvent_eps]."""
-    return np.array([bsse_dE, solvent_eps, bsse_dE * solvent_eps])
+def _build_features(bsse_dE: float, solvent_eps: float,
+                     contact_freq: float = 0, ebn: float = 0,
+                     n_hbonds: float = 0) -> np.ndarray:
+    """Build feature vector for IF prediction.
+
+    Extended features (Gradient Boosting can handle more):
+    - bsse_dE: DFT binding energy (kcal/mol)
+    - solvent_eps: dielectric constant
+    - bsse_dE * solvent_eps: interaction term
+    - |bsse_dE|: absolute binding strength
+    - contact_freq: MD contact frequency (Stage 4)
+    - ebn: effective binding number (Stage 4)
+    - n_hbonds: H-bond count per frame (Stage 4)
+    """
+    return np.array([
+        bsse_dE, solvent_eps, bsse_dE * solvent_eps,
+        abs(bsse_dE), contact_freq, ebn, n_hbonds
+    ])
 
 
 def _build_Xy(data: list[dict]) -> tuple[np.ndarray, np.ndarray]:
-    """Build X matrix and y vector from data records."""
-    X = np.array([_build_features(d["bsse_dE"], d["solvent_eps"]) for d in data])
+    """Build X matrix and y vector from data records.
+
+    Drops zero-variance features (e.g., contact_freq/ebn/n_hbonds when
+    all training samples lack MD data) to prevent overfitting.
+    """
+    X_full = np.array([_build_features(
+        d["bsse_dE"], d["solvent_eps"],
+        d.get("contact_freq", 0), d.get("ebn", 0), d.get("n_hbonds", 0)
+    ) for d in data])
     y = np.array([d["IF"] for d in data])
+
+    # Drop columns with zero variance (all same value)
+    variances = X_full.var(axis=0)
+    keep_mask = variances > 1e-10
+    X = X_full[:, keep_mask]
+
     return X, y
 
 
 # ── Model Training & Selection ──────────────────────────────────────
 
-def _get_candidate_models() -> dict:
-    """Return dict of model_name -> model instance."""
+def _get_candidate_models(n_features: int = 7) -> dict:
+    """Return dict of model_name -> model instance.
+
+    Adjusts model complexity based on available features:
+    - With MD features (contact, ebn, hbonds > 0): full Gradient Boosting
+    - Without MD features (training data only): simpler models preferred
+    """
+    from sklearn.ensemble import GradientBoostingRegressor
+    # Scale complexity to feature count to prevent overfitting
+    gb_depth = min(3, max(1, n_features // 3))
+    gb_estimators = 50 if n_features <= 4 else 200
     return {
         "LinearRegression": LinearRegression(),
         "Ridge(alpha=1.0)": Ridge(alpha=1.0),
         "RandomForest(n=100,d=3)": RandomForestRegressor(
-            n_estimators=100, max_depth=3, random_state=42
+            n_estimators=100, max_depth=min(3, gb_depth + 1), random_state=42
+        ),
+        "GradientBoosting": GradientBoostingRegressor(
+            n_estimators=gb_estimators, max_depth=gb_depth,
+            learning_rate=0.05, random_state=42, subsample=0.8
         ),
     }
 

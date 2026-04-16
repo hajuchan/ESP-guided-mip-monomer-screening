@@ -77,6 +77,7 @@ TEMPERATURE = 298.15        # K
 
 # Feature 1: QuantumDock 분자 도킹 (Mukasa et al. 2023)
 # 분자 표면 전체에서 orientation 생성 + GFN2-xTB SP 스크리닝
+ENSEMBLE_DOCKING = False      # True: dock multiple monomer conformers, take best
 N_DOCK_ORIENTATIONS = 200    # monomer당 기본 docking 방향 수 (적응형으로 자동 스케일)
 N_TOP_FOR_OPTIMIZATION = 10  # SP 스크리닝 후 full optimization 대상 수
 DOCK_SURFACE_OFFSET = 2.5    # vdW 표면에서 monomer 중심까지 거리 (Angstrom)
@@ -128,6 +129,25 @@ def compute_molecular_volume(smiles: str) -> float:
 MD_RATIO_SCREENING = False      # True면 비율별 스크리닝
 MD_RATIOS_TO_TEST = [1, 2, 4]   # 테스트할 비율 목록
 MD_TEMPLATE_MONOMER_RATIO = 4   # 고정 비율 (MD_RATIO_SCREENING=False 시)
+
+# ── Stage 4: MD Parameters ──
+MD_TIME_NS = 50              # Production MD time (ns)
+MD_CONTACT_CUTOFF = 6.0      # Å, contact frequency cutoff
+MD_BOX_SIZE = 4.0            # nm, initial box size
+MD_TEMPERATURE = 298.15      # K, simulation temperature
+MD_SOLVENT = "water"         # "water" (TIP3P) or "acetonitrile" (GAFF2 explicit)
+MD_INCLUDE_CROSSLINKER = False   # True: add cross-linker to MD system (Ye 2024)
+MD_CROSSLINKER_RATIO = 20       # cross-linker:template molar ratio
+MD_MULTI_MONOMER = False         # True: include all top monomers in one simulation
+MD_MULTI_MONOMER_TOP_N = 3       # Number of top monomers to include in multi-monomer MD
+
+# ── Stage 5: VIP Parameters ──
+VIP_N_SNAPSHOTS = 5              # Equilibrium snapshots (evenly spaced)
+VIP_RESTRAINT_K = 1000           # kJ/mol/nm² position restraint
+VIP_REMOVAL_NS = 10             # Template removal test (ns)
+VIP_REBINDING_NS = 10           # Rebinding MD (ns)
+VIP_RMSD_THRESHOLD = 5.0        # Å, rebinding success
+VIP_REMOVAL_THRESHOLD = 8.0     # Å, template escaped (removal OK)
 
 # Feature 4: ESP 맵 시각화
 USE_ESP_MAP = True  # True면 Stage 2에서 ESP 맵 생성

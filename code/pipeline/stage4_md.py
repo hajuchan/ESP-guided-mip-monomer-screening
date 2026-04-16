@@ -27,16 +27,13 @@ from .config import (
     TEMPLATE_SMILES, TEMPLATE_NAME, MONOMER_LIBRARY,
     TEMPERATURE, OUTPUT_DIR, OUTPUT_DIRS,
     MD_RATIO_SCREENING, MD_RATIOS_TO_TEST, MD_TEMPLATE_MONOMER_RATIO,
+    MD_TIME_NS, MD_CONTACT_CUTOFF, MD_BOX_SIZE,
+    MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO,
+    CROSSLINKER_LIBRARY,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [Stage4] %(message)s")
 logger = logging.getLogger(__name__)
-
-# ── Stage 4 Parameters ──
-MD_TIME_NS = 50              # Production MD time
-MD_N_MONOMERS = 4            # Default template:monomer ratio
-MD_CONTACT_CUTOFF = 6.0      # Å, contact frequency cutoff
-MD_BOX_SIZE = 4.0            # nm, initial box size
 
 
 def run_stage4(template_smiles: str = None,
@@ -98,7 +95,8 @@ def run_stage4(template_smiles: str = None,
             continue
 
         m_smiles = monomer_library[m_name]
-        n_mono = MD_TEMPLATE_MONOMER_RATIO if not MD_RATIO_SCREENING else MD_RATIOS_TO_TEST[-1]
+        ratios = MD_RATIOS_TO_TEST if MD_RATIO_SCREENING else [MD_TEMPLATE_MONOMER_RATIO]
+        n_mono = ratios[-1]  # Use highest ratio for analysis
 
         logger.info(f"\n{'='*20} MD: {m_name} (1:{n_mono}) {'='*20}")
 
@@ -114,6 +112,9 @@ def run_stage4(template_smiles: str = None,
                 work_dir=md_dir / "build",
                 box_size=MD_BOX_SIZE,
                 temperature=TEMPERATURE,
+                crosslinker_smiles=list(CROSSLINKER_LIBRARY.values())[0] if MD_INCLUDE_CROSSLINKER else None,
+                crosslinker_name=list(CROSSLINKER_LIBRARY.keys())[0] if MD_INCLUDE_CROSSLINKER else None,
+                n_crosslinker=MD_CROSSLINKER_RATIO if MD_INCLUDE_CROSSLINKER else 0,
             )
 
             if "error" in sys_info:
@@ -144,7 +145,10 @@ def run_stage4(template_smiles: str = None,
                 "EBN": analysis.get("EBN", 0),
                 "mean_min_distance_A": analysis.get("mean_min_distance_A"),
                 "n_frames_analyzed": analysis.get("n_frames_analyzed", 0),
-                "n_hbonds_stable": 0,  # TODO: implement H-bond analysis
+                "n_hbonds_mean": analysis.get("n_hbonds_mean", 0),
+                "interaction_energy_kJ": analysis.get("interaction_energy_kJ"),
+                "interaction_energy_std": analysis.get("interaction_energy_std"),
+                "ie_method": analysis.get("ie_method", "N/A"),
                 "success": True,
             }
 
@@ -170,7 +174,137 @@ def run_stage4(template_smiles: str = None,
     _recommend_ratios(all_results)
     _print_summary(all_results)
 
+    # ── Multi-monomer combination optimization + MD ──
+    from .config import (MD_MULTI_MONOMER, MD_MULTI_MONOMER_TOP_N,
+                         MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO)
+    if MD_MULTI_MONOMER and len(all_results) >= 2:
+        logger.info("\n--- Multi-monomer combination optimization ---")
+        try:
+            combo = _optimize_combination(all_results, monomer_library, out_path)
+            if combo and combo.get("selected"):
+                combo_names = combo["selected"]
+                combo_smiles = {n: monomer_library[n] for n in combo_names if n in monomer_library}
+
+                logger.info(f"  Optimal combination: {combo_names} (score={combo['score']:.3f})")
+                with open(out_path / "stage4_combination.json", "w") as f:
+                    json.dump(combo, f, indent=2, default=str)
+
+                # Run multi-monomer MD
+                from .utils_gromacs import build_multi_monomer_system, run_md_pipeline, analyze_md
+                mm_dir = out_path / "multi_monomer"
+                mm_dir.mkdir(exist_ok=True)
+
+                xl_smiles = list(CROSSLINKER_LIBRARY.values())[0] if MD_INCLUDE_CROSSLINKER else None
+                xl_name = list(CROSSLINKER_LIBRARY.keys())[0] if MD_INCLUDE_CROSSLINKER else None
+
+                sys_info = build_multi_monomer_system(
+                    template_smiles, "TMP", combo_smiles,
+                    n_per_monomer=2, work_dir=mm_dir / "build",
+                    box_size=MD_BOX_SIZE + 1.0,  # larger box for more molecules
+                    crosslinker_smiles=xl_smiles,
+                    crosslinker_name=xl_name,
+                    n_crosslinker=MD_CROSSLINKER_RATIO if MD_INCLUDE_CROSSLINKER else 0,
+                )
+                if "error" not in sys_info:
+                    import shutil as _shutil
+                    for f in (mm_dir / "build").glob("*"):
+                        if f.is_file():
+                            _shutil.copy2(str(f), str(mm_dir / f.name))
+                    run_md_pipeline(mm_dir, time_ns=MD_TIME_NS, temperature=TEMPERATURE)
+                    mm_analysis = analyze_md(mm_dir, template_name="TMP",
+                                             cutoff_A=MD_CONTACT_CUTOFF)
+                    combo["md_analysis"] = mm_analysis
+                    with open(out_path / "stage4_combination.json", "w") as f:
+                        json.dump(combo, f, indent=2, default=str)
+                    logger.info(f"  Multi-monomer MD complete: "
+                                f"contact={mm_analysis.get('contact_frequency', 0):.4f}")
+        except Exception as e:
+            logger.warning(f"  Multi-monomer optimization failed: {e}")
+            import traceback; traceback.print_exc()
+
     return all_results
+
+
+def _optimize_combination(all_results, monomer_library, out_path):
+    """Find optimal monomer combination based on Stage 4 MD metrics.
+
+    Uses Stage 2 binding energy + Stage 4 contact frequency/EBN.
+    Greedy forward selection with binding site diversity bonus.
+    """
+    from .config import MD_MULTI_MONOMER_TOP_N
+    import json
+
+    n_select = MD_MULTI_MONOMER_TOP_N
+
+    # Load Stage 2 binding energies
+    s2_path = out_path.parent / "stage2" / "stage2_dft.json"
+    s2 = {}
+    if s2_path.exists():
+        with open(s2_path) as f:
+            s2_data = json.load(f)
+        for m, solvents in s2_data.items():
+            for solv, vals in solvents.items():
+                if isinstance(vals, dict) and "bsse_dE" in vals:
+                    s2[m] = abs(vals["bsse_dE"])
+                    break
+
+    # Load Stage 1 binding sites
+    s1_path = out_path.parent / "stage1" / "stage1_all.json"
+    sites = {}
+    if s1_path.exists():
+        with open(s1_path) as f:
+            for entry in json.load(f):
+                sites[entry.get("name")] = entry.get("binding_site", {}).get("atom_idx")
+
+    # Build per-monomer score from Stage 4 results
+    mono_data = {}
+    for r in all_results:
+        m = r["monomer"]
+        mono_data[m] = {
+            "contact": r.get("contact_frequency", 0),
+            "ebn": r.get("EBN", 0),
+            "hbonds": r.get("n_hbonds_mean", 0),
+            "be": s2.get(m, 10),
+            "site": sites.get(m),
+        }
+
+    ranked = sorted(mono_data.keys(),
+                    key=lambda m: mono_data[m]["contact"], reverse=True)
+    if len(ranked) <= n_select:
+        return {"selected": ranked, "score": 0, "method": "all_monomers"}
+
+    # Greedy forward selection
+    be_median = np.median([d["be"] for d in mono_data.values()])
+    selected = []
+    remaining = list(ranked)
+
+    for step in range(n_select):
+        best_m, best_score = None, -float("inf")
+        for c in remaining:
+            trial = selected + [c]
+            # Weighted score: contact + EBN + inverted-U BE
+            score = sum(
+                mono_data[m]["contact"] * 2 +
+                min(mono_data[m]["ebn"] / 100, 1) +
+                np.exp(-0.5 * ((mono_data[m]["be"] - be_median) / 3)**2)
+                for m in trial
+            )
+            # Site diversity bonus
+            trial_sites = [mono_data[m]["site"] for m in trial if mono_data[m]["site"] is not None]
+            diversity = len(set(trial_sites)) / len(trial) if trial_sites else 1.0
+            score *= (1 + 0.5 * diversity)
+            if score > best_score:
+                best_score, best_m = score, c
+        if best_m:
+            selected.append(best_m)
+            remaining.remove(best_m)
+
+    return {
+        "selected": selected,
+        "score": round(best_score, 3),
+        "method": "greedy_forward_selection",
+        "metrics": {m: mono_data[m] for m in selected},
+    }
 
 
 def _recommend_ratios(results):

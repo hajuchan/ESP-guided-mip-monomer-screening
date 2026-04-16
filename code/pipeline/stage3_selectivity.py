@@ -403,5 +403,137 @@ def run_stage3(template_smiles: str = None,
     return top_names
 
 
+# Note: Multi-monomer combination optimization moved to stage4_md.py
+# where Stage 4 MD metrics (contact freq, EBN) are available.
+
+
+def _legacy_optimize_monomer_combination(template_dft, interferent_dft,
+                                  interferent_library, template_smiles,
+                                  monomer_library, ranked_names,
+                                  n_select=3, output_dir=None):
+    """Find the optimal combination of n_select monomers for MIP synthesis.
+
+    Strategy (adapted from Bio Phase 3 MMSD for small-molecule MIP):
+    1. Score each monomer by: selectivity × binding_diversity
+    2. Greedy forward selection: add monomer that maximizes combo score
+    3. Interference check: penalize monomers binding to the same site
+
+    Combo score = sum(individual selectivity) × diversity_bonus × (1 - interference_penalty)
+
+    Reference: Bio project Phase 3 MMSD (greedy forward selection + swap refinement)
+    """
+    from itertools import combinations
+
+    if len(ranked_names) <= n_select:
+        return {"selected": ranked_names, "score": 0, "method": "all_monomers"}
+
+    # Collect per-monomer metrics
+    mono_scores = {}
+    mono_sites = {}
+    for m in ranked_names:
+        m_data = template_dft.get(m, {})
+        # Get binding energy and site info
+        be = None
+        for solv, vals in m_data.items():
+            if isinstance(vals, dict) and "bsse_dE" in vals:
+                be = abs(vals["bsse_dE"])
+                break
+        if be is None:
+            continue
+
+        # Get binding site from Stage 1 (if available)
+        s1_path = Path(output_dir).parent / "stage1" / "stage1_all.json" if output_dir else None
+        site_idx = None
+        if s1_path and s1_path.exists():
+            with open(s1_path) as f:
+                s1_data = json.load(f)
+            for entry in s1_data:
+                if entry.get("name") == m:
+                    site_idx = entry.get("binding_site", {}).get("atom_idx")
+                    break
+
+        mono_scores[m] = be
+        mono_sites[m] = site_idx
+
+    if not mono_scores:
+        return None
+
+    # Greedy forward selection
+    selected = []
+    remaining = list(mono_scores.keys())
+
+    for step in range(min(n_select, len(remaining))):
+        best_m = None
+        best_score = -float("inf")
+
+        for candidate in remaining:
+            trial = selected + [candidate]
+
+            # 1. Sum of binding energies (moderate is better — inverted U)
+            be_values = [mono_scores[m] for m in trial]
+            be_median = np.median(list(mono_scores.values()))
+            be_score = sum(np.exp(-0.5 * ((be - be_median) / 3.0)**2) for be in be_values)
+
+            # 2. Site diversity bonus: different binding sites → better cavity
+            sites = [mono_sites.get(m) for m in trial if mono_sites.get(m) is not None]
+            n_unique = len(set(sites)) if sites else len(trial)
+            diversity = n_unique / len(trial)
+
+            # 3. Interference penalty: same site → competition
+            interference = 0
+            if len(sites) > 1:
+                from collections import Counter
+                site_counts = Counter(sites)
+                interference = sum(c - 1 for c in site_counts.values()) / len(sites)
+
+            combo_score = be_score * (1 + 0.5 * diversity) * (1 - 0.3 * interference)
+
+            if combo_score > best_score:
+                best_score = combo_score
+                best_m = candidate
+
+        if best_m:
+            selected.append(best_m)
+            remaining.remove(best_m)
+            logger.info(f"  Step {step+1}: + {best_m} (score={best_score:.3f})")
+
+    # Swap refinement: try replacing each position
+    improved = True
+    while improved:
+        improved = False
+        for i in range(len(selected)):
+            current = selected[i]
+            for candidate in remaining:
+                trial = selected[:i] + [candidate] + selected[i+1:]
+                be_values = [mono_scores[m] for m in trial]
+                be_median = np.median(list(mono_scores.values()))
+                be_score = sum(np.exp(-0.5 * ((be - be_median) / 3.0)**2) for be in be_values)
+                sites = [mono_sites.get(m) for m in trial if mono_sites.get(m) is not None]
+                n_unique = len(set(sites)) if sites else len(trial)
+                diversity = n_unique / len(trial)
+                from collections import Counter
+                interference = 0
+                if len(sites) > 1:
+                    site_counts = Counter(sites)
+                    interference = sum(c - 1 for c in site_counts.values()) / len(sites)
+                trial_score = be_score * (1 + 0.5 * diversity) * (1 - 0.3 * interference)
+                if trial_score > best_score * 1.01:  # 1% improvement threshold
+                    selected[i] = candidate
+                    remaining.append(current)
+                    remaining.remove(candidate)
+                    current = candidate
+                    best_score = trial_score
+                    improved = True
+                    logger.info(f"  Swap: {selected} (score={best_score:.3f})")
+
+    return {
+        "selected": selected,
+        "score": round(best_score, 3),
+        "method": "greedy_forward_selection_with_swap",
+        "binding_sites": {m: mono_sites.get(m) for m in selected},
+        "binding_energies": {m: round(mono_scores.get(m, 0), 2) for m in selected},
+    }
+
+
 if __name__ == "__main__":
     run_stage3()

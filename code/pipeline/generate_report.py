@@ -320,7 +320,7 @@ def _build_stage4(out: pathlib.Path) -> str:
         for mono, info in md_data.items():
             if isinstance(info, dict):
                 ebn = info.get("EBN", "N/A")
-                hb = info.get("n_hbonds_stable", "N/A")
+                hb = info.get("n_hbonds_mean", info.get("n_hbonds_stable", "N/A"))
                 ratio = info.get("ratio", "N/A")
                 if isinstance(ebn, float):
                     ebn = f"{ebn:.3f}"
@@ -332,6 +332,26 @@ def _build_stage4(out: pathlib.Path) -> str:
         body_parts.append(
             f'<p><b>Radial Distribution Function (RDF):</b></p>'
             f'<img class="plot" src="{rdf_uri}" alt="RDF Plot"/>')
+
+    # XVG inline plots for each monomer's MD trajectory
+    stage4_dir = out / "stage4"
+    if stage4_dir.is_dir():
+        xvg_plots = []
+        for mono_dir in sorted(stage4_dir.iterdir()):
+            if not mono_dir.is_dir():
+                continue
+            m_name = mono_dir.name
+            for xvg_name, title, xlabel, ylabel in [
+                ("md.edr", f"{m_name} Energy", "Time (ps)", "Energy (kJ/mol)"),
+            ]:
+                # Try RMSD xvg if available
+                rmsd_xvg = mono_dir / "rmsd.xvg"
+                if rmsd_xvg.exists():
+                    xvg_plots.append(_xvg_to_inline_plot(
+                        rmsd_xvg, f"{m_name} RMSD", "Time (ps)", "RMSD (nm)"))
+        if xvg_plots:
+            body_parts.append("<h3>MD Trajectory Plots</h3>")
+            body_parts.extend(xvg_plots)
 
     return _section("Stage 4 — MD Validation", "\n".join(body_parts))
 
@@ -495,6 +515,131 @@ def _build_references() -> str:
 
 
 # ---------------------------------------------------------------------------
+# XVG inline plot utility (ported from Bio project)
+# ---------------------------------------------------------------------------
+
+def _xvg_to_inline_plot(xvg_path, title, xlabel, ylabel):
+    """Convert GROMACS XVG file to inline base64 plot for HTML embedding."""
+    xvg_path = pathlib.Path(xvg_path)
+    if not xvg_path.exists():
+        return f"<p><em>{title}: data not available</em></p>"
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import io
+
+        data = []
+        for line in xvg_path.read_text().split("\n"):
+            if line.startswith(("#", "@")) or not line.strip():
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    data.append([float(parts[0]), float(parts[1])])
+                except ValueError:
+                    pass
+        if not data:
+            return f"<p><em>{title}: no data</em></p>"
+
+        arr = np.array(data)
+        fig, ax = plt.subplots(figsize=(4, 2.5))
+        ax.plot(arr[:, 0], arr[:, 1], linewidth=0.8, color='#2196F3')
+        ax.set_title(title, fontsize=10, fontweight='bold')
+        ax.set_xlabel(xlabel, fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.tick_params(labelsize=7)
+        fig.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=100)
+        plt.close(fig)
+        img_data = base64.b64encode(buf.getvalue()).decode()
+        return f'<img src="data:image/png;base64,{img_data}" style="max-width:100%;" />'
+    except Exception as e:
+        return f"<p><em>{title}: plot error ({e})</em></p>"
+
+
+def _build_selectivity_matrix(out):
+    """Build interferent selectivity matrix as HTML table."""
+    s3_path = out / "stage3" / "stage3_interferent_dft.json"
+    s2_path = out / "stage2" / "stage2_dft.json"
+    if not s3_path.exists() or not s2_path.exists():
+        return ""
+
+    s2 = json.loads(s2_path.read_text())
+    s3 = json.loads(s3_path.read_text())
+
+    # Get template binding energy per monomer
+    tmpl_be = {}
+    for m, solvents in s2.items():
+        for solv, data in solvents.items():
+            if isinstance(data, dict):
+                tmpl_be[m] = data.get("bsse_dE", 0)
+                break
+
+    # Get interferent binding energies
+    interf_names = list(s3.keys())
+    if not interf_names or not tmpl_be:
+        return ""
+
+    # Build matrix
+    header = "<th>Monomer</th><th>Template</th>" + "".join(
+        f"<th>{i}</th>" for i in interf_names)
+
+    rows = ""
+    for m in sorted(tmpl_be.keys()):
+        t_be = tmpl_be[m]
+        cells = f"<td style='font-weight:bold;background:#e8f5e9;'>{t_be:.2f}</td>"
+        for iname in interf_names:
+            i_data = s3.get(iname, {}).get(m, {})
+            i_be = list(i_data.values())[0] if isinstance(i_data, dict) and i_data else None
+            if i_be is not None:
+                color = "green" if abs(i_be) < abs(t_be) else "red"
+                cells += f"<td style='color:{color};'>{i_be:.2f}</td>"
+            else:
+                cells += "<td>N/A</td>"
+        rows += f"<tr><td><strong>{m}</strong></td>{cells}</tr>"
+
+    return f"""
+    <h2>Selectivity Matrix (Binding Energy, kcal/mol)</h2>
+    <div style="overflow-x:auto;">
+        <p>Template column (green) vs interferents. <span style="color:red;">Red</span> = interferent binds stronger (poor selectivity).</p>
+        <table><tr>{header}</tr>{rows}</table>
+    </div>"""
+
+
+def _build_stage5_section(out):
+    """Build Stage 5 VIP rebinding section for HTML report."""
+    vip_path = out / "stage5" / "stage5_vip.json"
+    if not vip_path.exists():
+        return ""
+
+    vip = json.loads(vip_path.read_text())
+    rows = ""
+    for m, data in sorted(vip.items(), key=lambda x: -x[1].get("vip_score", 0)
+                           if isinstance(x[1], dict) else 0):
+        if not isinstance(data, dict):
+            continue
+        rows += f"""<tr>
+            <td>{m}</td>
+            <td>{data.get('rebind_rate', 0):.0%}</td>
+            <td>{data.get('removal_rate', 0):.0%}</td>
+            <td>{data.get('selectivity_index', 0):.2f}</td>
+            <td><strong>{data.get('vip_score', 0):.3f}</strong></td>
+        </tr>"""
+
+    return f"""
+    <h2>Stage 5: VIP Cavity Rebinding</h2>
+    <table>
+        <tr><th>Monomer</th><th>Rebind Rate</th><th>Removal Rate</th>
+            <th>Selectivity Index</th><th>VIP Score</th></tr>
+        {rows}
+    </table>"""
+
+
+# ---------------------------------------------------------------------------
 # Main report generator
 # ---------------------------------------------------------------------------
 
@@ -515,7 +660,9 @@ def generate_report(output_dir: str = OUTPUT_DIR) -> str:
         _build_stage1(out),
         _build_stage2(out),
         _build_stage3(out),
+        _build_selectivity_matrix(out),
         _build_stage4(out),
+        _build_stage5_section(out),
         _build_crosslinker(out),
         _build_esp_gallery(out),
         _build_recommendations(out),

@@ -1,0 +1,15 @@
+[INFO   ] Starting gmx_MMPBSA 1.6.4
+[DEBUG  ] WDIR          : /home/chan/Research/MIP_simulation
+[DEBUG  ] AMBERHOME     : /home/chan/anaconda3/envs/MIPscreen
+[DEBUG  ] PYTHON EXE    : /home/chan/anaconda3/envs/MIPscreen/bin/python
+[DEBUG  ] PYTHON VERSION: 3.10.12 (main, Mar  3 2026, 11:56:32) [GCC 11.4.0]
+[DEBUG  ] MPI           : /usr/bin/mpirun
+[DEBUG  ] ParmEd        : 4.3.1
+[DEBUG  ] OS PLATFORM   : Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35
+[DEBUG  ] OS SYSTEM     : Linux
+[DEBUG  ] OS VERSION    : #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025
+[DEBUG  ] OS PROCESSOR  : x86_64
+
+[INFO   ] Command-line
+  gmx_MMPBSA --help
+
