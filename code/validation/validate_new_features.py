@@ -151,9 +151,9 @@ def validate_ratio_screening(output_dir: str = OUTPUT_DIR) -> dict:
         logger.info("  C. Ratio screening disabled — SKIP")
         return result
 
-    md_path = out / "stage4" / "stage4_md.json"
+    md_path = out / "stage5" / "stage5_md.json"
     if not md_path.exists():
-        logger.info("  C. stage4_md.json not found — SKIP")
+        logger.info("  C. stage5_md.json not found — SKIP")
         return result
 
     with open(md_path) as f:

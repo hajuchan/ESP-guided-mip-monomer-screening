@@ -1,5 +1,5 @@
 """
-Stage 4: Pre-polymerization MD Simulation (GROMACS)
+Stage 5: Pre-polymerization MD Simulation (GROMACS)
 ===================================================
 Simulates template + monomers in explicit solvent to evaluate
 dynamic binding behavior before polymerization.
@@ -32,11 +32,11 @@ from .config import (
     CROSSLINKER_LIBRARY,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [Stage4] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [Stage5] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def run_stage4(template_smiles: str = None,
+def run_stage5(template_smiles: str = None,
                monomer_names: list = None,
                monomer_library: dict = None,
                output_dir: str = None) -> dict:
@@ -51,7 +51,7 @@ def run_stage4(template_smiles: str = None,
     monomer_library = monomer_library or MONOMER_LIBRARY
 
     if output_dir is None:
-        output_dir = OUTPUT_DIRS.get("stage4", f"{OUTPUT_DIR}/stage4")
+        output_dir = OUTPUT_DIRS.get("stage5", f"{OUTPUT_DIR}/stage5")
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -70,7 +70,7 @@ def run_stage4(template_smiles: str = None,
             monomer_names = list(monomer_library.keys())
 
     # Skip logic
-    result_file = out_path / "stage4_md.json"
+    result_file = out_path / "stage5_md.json"
     existing = []
     existing_names = set()
     if result_file.exists():
@@ -84,7 +84,7 @@ def run_stage4(template_smiles: str = None,
 
     all_results = list(existing)
 
-    logger.info(f"Stage 4: GROMACS MD for {monomer_names}")
+    logger.info(f"Stage 5: GROMACS MD for {monomer_names}")
 
     for m_name in monomer_names:
         if m_name in existing_names:
@@ -163,7 +163,7 @@ def run_stage4(template_smiles: str = None,
                         f"EBN={result['EBN']:.4f}")
 
         except Exception as e:
-            logger.error(f"  Stage 4 failed for {m_name}: {e}")
+            logger.error(f"  Stage 5 failed for {m_name}: {e}")
             import traceback; traceback.print_exc()
 
     # Final save
@@ -180,13 +180,44 @@ def run_stage4(template_smiles: str = None,
     if MD_MULTI_MONOMER and len(all_results) >= 2:
         logger.info("\n--- Multi-monomer combination optimization ---")
         try:
-            combo = _optimize_combination(all_results, monomer_library, out_path)
+            from . import config as _cfg
+            combo = None
+            # Prefer the combination already chosen by Stage 4 (MMSD)
+            mmsd_json = out_path.parent / "stage4" / "mmsd_results.json"
+            mres = None
+            if mmsd_json.exists():
+                try:
+                    mres = json.loads(mmsd_json.read_text())
+                except Exception:
+                    mres = None
+            # If Stage 4 (MMSD) was not run, fall back to running it here
+            if mres is None and getattr(_cfg, "MMSD_ENABLE", True):
+                try:
+                    from .stage4_mmsd import run_mmsd
+                    mres = run_mmsd(template_smiles=template_smiles,
+                                    output_dir=str(out_path.parent / "stage4"))
+                except Exception as e:
+                    logger.warning(f"  MMSD search failed ({e}); "
+                                   f"using greedy metric selection")
+            top = (mres or {}).get("top_pcs") or []
+            if top:
+                pc = top[0]
+                combo = {
+                    "selected": [m for m in pc.get("functional_monomers", [])
+                                 if m in monomer_library],
+                    "score": pc.get("bo_objective") or 0.0,
+                    "method": f"MMSD ({(mres or {}).get('optimizer')})",
+                    "crosslinker": pc.get("crosslinker"),
+                    "mmsd": pc,
+                }
+            if not (combo and combo.get("selected")):
+                combo = _optimize_combination(all_results, monomer_library, out_path)
             if combo and combo.get("selected"):
                 combo_names = combo["selected"]
                 combo_smiles = {n: monomer_library[n] for n in combo_names if n in monomer_library}
 
                 logger.info(f"  Optimal combination: {combo_names} (score={combo['score']:.3f})")
-                with open(out_path / "stage4_combination.json", "w") as f:
+                with open(out_path / "stage5_combination.json", "w") as f:
                     json.dump(combo, f, indent=2, default=str)
 
                 # Run multi-monomer MD
@@ -194,8 +225,14 @@ def run_stage4(template_smiles: str = None,
                 mm_dir = out_path / "multi_monomer"
                 mm_dir.mkdir(exist_ok=True)
 
-                xl_smiles = list(CROSSLINKER_LIBRARY.values())[0] if MD_INCLUDE_CROSSLINKER else None
-                xl_name = list(CROSSLINKER_LIBRARY.keys())[0] if MD_INCLUDE_CROSSLINKER else None
+                # Prefer the crosslinker chosen by MMSD, else first in library
+                _mmsd_xl = combo.get("crosslinker")
+                if MD_INCLUDE_CROSSLINKER:
+                    xl_name = (_mmsd_xl if _mmsd_xl in CROSSLINKER_LIBRARY
+                               else list(CROSSLINKER_LIBRARY.keys())[0])
+                    xl_smiles = CROSSLINKER_LIBRARY[xl_name]
+                else:
+                    xl_name = xl_smiles = None
 
                 sys_info = build_multi_monomer_system(
                     template_smiles, "TMP", combo_smiles,
@@ -214,7 +251,7 @@ def run_stage4(template_smiles: str = None,
                     mm_analysis = analyze_md(mm_dir, template_name="TMP",
                                              cutoff_A=MD_CONTACT_CUTOFF)
                     combo["md_analysis"] = mm_analysis
-                    with open(out_path / "stage4_combination.json", "w") as f:
+                    with open(out_path / "stage5_combination.json", "w") as f:
                         json.dump(combo, f, indent=2, default=str)
                     logger.info(f"  Multi-monomer MD complete: "
                                 f"contact={mm_analysis.get('contact_frequency', 0):.4f}")
@@ -226,9 +263,9 @@ def run_stage4(template_smiles: str = None,
 
 
 def _optimize_combination(all_results, monomer_library, out_path):
-    """Find optimal monomer combination based on Stage 4 MD metrics.
+    """Find optimal monomer combination based on Stage 5 MD metrics.
 
-    Uses Stage 2 binding energy + Stage 4 contact frequency/EBN.
+    Uses Stage 2 binding energy + Stage 5 contact frequency/EBN.
     Greedy forward selection with binding site diversity bonus.
     """
     from .config import MD_MULTI_MONOMER_TOP_N
@@ -256,7 +293,7 @@ def _optimize_combination(all_results, monomer_library, out_path):
             for entry in json.load(f):
                 sites[entry.get("name")] = entry.get("binding_site", {}).get("atom_idx")
 
-    # Build per-monomer score from Stage 4 results
+    # Build per-monomer score from Stage 5 results
     mono_data = {}
     for r in all_results:
         m = r["monomer"]
@@ -324,9 +361,9 @@ def _recommend_ratios(results):
 
 
 def _print_summary(results):
-    """Print Stage 4 summary."""
+    """Print Stage 5 summary."""
     logger.info(f"\n{'='*60}")
-    logger.info("Stage 4: Pre-polymerization MD Summary")
+    logger.info("Stage 5: Pre-polymerization MD Summary")
     logger.info(f"{'='*60}")
     logger.info(f"{'Monomer':<10} {'Contact Freq':>12} {'EBN':>8} {'Mean Dist(Å)':>12}")
     logger.info("-" * 45)
@@ -342,4 +379,4 @@ def _print_summary(results):
 
 
 if __name__ == "__main__":
-    run_stage4()
+    run_stage5()

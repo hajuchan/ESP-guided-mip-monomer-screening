@@ -725,11 +725,12 @@ def generate_esp_map(atom_str: str, basis: str, eps: float,
 
         bohr2ang = 0.529177
 
-        # Marching cubes to extract isosurface at rho = 0.02
+        # Marching cubes — smooth molecular surface (Singh 2012 style)
+        # iso=0.002 gives the standard "molecular envelope"; 0.02 gives atom-blobs
         from skimage.measure import marching_cubes
-        iso_val = 0.02
+        iso_val = 0.002
         if rho.max() < iso_val:
-            iso_val = rho.max() * 0.3  # fallback for small molecules
+            iso_val = rho.max() * 0.05
 
         verts, faces, _, _ = marching_cubes(rho, iso_val)
 
@@ -753,51 +754,110 @@ def generate_esp_map(atom_str: str, basis: str, eps: float,
         vmax = min(0.05, np.percentile(np.abs(esp_on_surface), 95))
         esp_clamped = np.clip(esp_on_surface, -vmax, vmax)
 
-        # Atom spheres
-        elem_colors = {1: '#FFFFFF', 6: '#808080', 7: '#3050F8', 8: '#FF0D0D',
-                       5: '#FFB5B5', 17: '#1FF01F', 16: '#FFFF30'}
-        elem_radii = {1: 0.25, 6: 0.4, 7: 0.4, 8: 0.4, 5: 0.45, 17: 0.5, 16: 0.5}
+        # vdW radii (Bondi 1964) for atom marker sizes — Å
+        vdw_radii = {1: 1.20, 6: 1.70, 7: 1.55, 8: 1.52,
+                     5: 1.92, 9: 1.47, 15: 1.80, 16: 1.80, 17: 1.75, 35: 1.85}
 
-        # Build plotly figure
+        # Singh 2012 style: smooth electron density isosurface colored by ESP
+        # Jet-like colormap: red (negative) → orange → yellow → green → blue (positive)
+        custom_colorscale = [
+            [0.0, "red"],
+            [0.25, "orange"],
+            [0.45, "yellow"],
+            [0.5, "green"],
+            [0.55, "cyan"],
+            [0.75, "dodgerblue"],
+            [1.0, "blue"],
+        ]
+
+        # Build plotly figure with 3 traces:
+        #   Trace 0: ESP-colored isosurface (variable opacity)
+        #   Trace 1: Atom markers (fixed)
+        #   Trace 2: Bond lines (fixed)
         fig = go.Figure()
 
-        # ESP-colored isosurface
+        # Trace 0: Smooth electron density isosurface, colored by ESP
         fig.add_trace(go.Mesh3d(
             x=cart_verts[:, 0], y=cart_verts[:, 1], z=cart_verts[:, 2],
             i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
             intensity=esp_clamped,
-            colorscale='RdBu_r',
+            colorscale=custom_colorscale,
             cmin=-vmax, cmax=vmax,
-            opacity=0.7,
-            colorbar=dict(title='ESP (a.u.)', thickness=15),
+            opacity=0.6,
+            colorbar=dict(title='ESP (a.u.)', len=0.5, thickness=12),
             name='ESP surface',
+            showscale=True,
         ))
 
-        # Atom spheres
+        # Trace 1: Atom markers
+        elem_colors = {1: '#FFFFFF', 6: '#808080', 7: '#3050F8', 8: '#FF0D0D',
+                       5: '#FFB5B5', 9: '#90E050', 15: '#FF8000',
+                       16: '#FFFF30', 17: '#1FF01F'}
+        atom_x, atom_y, atom_z = [], [], []
+        atom_colors_l, atom_sizes, atom_text = [], [], []
         for atom in atoms:
             Z = atom['Z']
             pos = atom['pos'] * bohr2ang
-            color = elem_colors.get(Z, '#FF00FF')
-            r = elem_radii.get(Z, 0.3)
+            atom_x.append(pos[0]); atom_y.append(pos[1]); atom_z.append(pos[2])
+            atom_colors_l.append(elem_colors.get(Z, '#FF00FF'))
+            atom_sizes.append(vdw_radii.get(Z, 1.5) * 5)
+            atom_text.append(f'Z={Z}')
 
-            # Simple sphere via scatter3d
-            fig.add_trace(go.Scatter3d(
-                x=[pos[0]], y=[pos[1]], z=[pos[2]],
-                mode='markers',
-                marker=dict(size=r * 15, color=color,
-                            line=dict(width=1, color='black')),
-                showlegend=False,
-                hovertext=f'Z={Z} ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})',
-            ))
+        fig.add_trace(go.Scatter3d(
+            x=atom_x, y=atom_y, z=atom_z,
+            mode='markers',
+            marker=dict(size=atom_sizes, color=atom_colors_l,
+                        line=dict(width=1, color='black')),
+            text=atom_text, showlegend=False, name='atoms', opacity=1.0,
+        ))
+
+        # Trace 2: Bonds (atom pairs within 1.8 Å)
+        bond_x, bond_y, bond_z = [], [], []
+        n_atoms_total = len(atoms)
+        for i in range(n_atoms_total):
+            pi = atoms[i]['pos'] * bohr2ang
+            for j in range(i+1, n_atoms_total):
+                pj = atoms[j]['pos'] * bohr2ang
+                d = np.linalg.norm(pi - pj)
+                if d < 1.8:
+                    bond_x += [pi[0], pj[0], None]
+                    bond_y += [pi[1], pj[1], None]
+                    bond_z += [pi[2], pj[2], None]
+        fig.add_trace(go.Scatter3d(
+            x=bond_x, y=bond_y, z=bond_z,
+            mode='lines',
+            line=dict(color='#444444', width=4),
+            showlegend=False, name='bonds', opacity=1.0,
+        ))
+
+        # Opacity slider — controls trace 0 (ESP)
+        opacity_steps = [
+            dict(args=["opacity", [op, 1.0, 1.0]],
+                 label=f"{int(op*100)}%", method="restyle")
+            for op in [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        ]
 
         fig.update_layout(
-            title=f'ESP Map: {label}',
+            title=label.replace("_", " ") + " ESP",
             scene=dict(
-                xaxis_title='x (Å)', yaxis_title='y (Å)', zaxis_title='z (Å)',
+                xaxis=dict(visible=False, showbackground=False,
+                           showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(visible=False, showbackground=False,
+                           showgrid=False, zeroline=False, showticklabels=False),
+                zaxis=dict(visible=False, showbackground=False,
+                           showgrid=False, zeroline=False, showticklabels=False),
                 aspectmode='data',
+                bgcolor='white',
             ),
-            width=700, height=600,
+            paper_bgcolor='white',
+            width=1400, height=1200,
             margin=dict(l=10, r=10, t=40, b=10),
+            sliders=[dict(
+                active=4,
+                currentvalue=dict(prefix="Surface Opacity: "),
+                len=0.8, pad=dict(t=30), x=0.1,
+                steps=opacity_steps,
+            )],
         )
 
         # Save interactive HTML

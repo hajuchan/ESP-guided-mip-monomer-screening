@@ -1,10 +1,11 @@
 """
-Stage 6: Synthesis Recipe Generation
+Stage 7: Synthesis Recipe Generation
 =====================================
 Generates synthesis protocol based on pipeline results:
-- Monomer ranking from Stage 5 VIP (or Stage 4 if VIP unavailable)
+- Monomer ranking from Stage 6 VIP (or Stage 5 MD if VIP unavailable)
 - Cross-linker recommendation from Stage 3
-- Synthesis ratio from Stage 4 contact frequency
+- Synthesis ratio from Stage 5 contact frequency
+- Global porogen from Stage 3 (solvent memory)
 - Protocol type: free-radical polymerization (default for organic monomers)
 
 Output: JSON recipe + human-readable protocol
@@ -23,7 +24,7 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 
-def run_stage6(output_dir: str = None) -> dict:
+def run_stage7(output_dir: str = None) -> dict:
     """Generate synthesis recipe from pipeline results."""
     if output_dir is None:
         output_dir = OUTPUT_DIRS.get("reports", f"{OUTPUT_DIR}/reports")
@@ -31,15 +32,28 @@ def run_stage6(output_dir: str = None) -> dict:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Prefer the globally-selected porogen from Stage 3 (solvent memory);
+    # fall back to the configured synthesis solvent.
+    solvent = SYNTHESIS_SOLVENT
+    porogen_path = base / "stage3" / "global_porogen.json"
+    if porogen_path.exists():
+        try:
+            with open(porogen_path) as f:
+                _p = json.load(f).get("porogen")
+            if _p:
+                solvent = _p
+        except Exception:
+            pass
+
     recipe = {
         "template": TEMPLATE_NAME,
         "template_smiles": TEMPLATE_SMILES,
-        "solvent": SYNTHESIS_SOLVENT,
+        "solvent": solvent,
     }
 
-    # ── Load VIP results (Stage 5) or Stage 4 ──
-    vip_path = base / "stage5" / "stage5_vip.json"
-    s4_path = base / "stage4" / "stage4_md.json"
+    # ── Load VIP results (Stage 6) or MD (Stage 5) ──
+    vip_path = base / "stage6" / "stage6_vip.json"
+    s4_path = base / "stage5" / "stage5_md.json"
 
     monomer_ranking = []
     if vip_path.exists():
@@ -120,13 +134,13 @@ def run_stage6(output_dir: str = None) -> dict:
 Template: {TEMPLATE_NAME} ({TEMPLATE_SMILES})
 Monomer:  {best_monomer} ({MONOMER_LIBRARY.get(best_monomer, '')})
 Cross-linker: {xl} ({CROSSLINKER_LIBRARY.get(xl, '')})
-Solvent:  {SYNTHESIS_SOLVENT}
+Solvent:  {solvent}
 
 Molar ratio (Template : Monomer : Cross-linker):
   1 : {ratio:.0f} : {ratio * 5:.0f}
 
 Protocol:
-1. Dissolve {TEMPLATE_NAME} (1 mmol) in {SYNTHESIS_SOLVENT} (10 mL)
+1. Dissolve {TEMPLATE_NAME} (1 mmol) in {solvent} (10 mL)
 2. Add {best_monomer} ({ratio:.0f} mmol) and stir for 30 min at RT
    → Pre-polymerization complex formation
 3. Add {xl} ({ratio * 5:.0f} mmol) and AIBN (0.1 mmol) as initiator
@@ -163,4 +177,4 @@ Quality control:
 
 
 if __name__ == "__main__":
-    run_stage6()
+    run_stage7()

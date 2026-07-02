@@ -1,8 +1,8 @@
 """
-Stage 5: VIP Cavity Formation + Rebinding Validation (GROMACS)
+Stage 6: VIP Cavity Formation + Rebinding Validation (GROMACS)
 =============================================================
 Virtually Imprinted Polymer (VIP) approach (Zink & Moura, PCCP 2018):
-1. Select equilibrium snapshots from Stage 4 MD trajectory
+1. Select equilibrium snapshots from Stage 5 MD trajectory
 2. Freeze monomer positions (position restraint → polymerization approximation)
 3. Template removal test → can template escape? (too strong = bad MIP)
 4. Rebind template → validate cavity recognition (RMSD < threshold)
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 #  Main entry point
 # ═══════════════════════════════════════════════════════════════
 
-def run_stage5(template_smiles: str = None,
+def run_stage6(template_smiles: str = None,
                monomer_names: list = None,
                monomer_library: dict = None,
                interferent_library: dict = None,
@@ -51,13 +51,13 @@ def run_stage5(template_smiles: str = None,
     interferent_library = interferent_library or INTERFERENT_LIBRARY
 
     if output_dir is None:
-        output_dir = OUTPUT_DIRS.get("stage5", f"{OUTPUT_DIR}/stage5")
+        output_dir = OUTPUT_DIRS.get("stage6", f"{OUTPUT_DIR}/stage6")
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
     # Load monomer list
     if monomer_names is None:
-        for src in [out_path.parent / "stage4" / "stage4_md.json",
+        for src in [out_path.parent / "stage5" / "stage5_md.json",
                     out_path.parent / "stage3" / "stage3_top.json"]:
             if src.exists():
                 with open(src) as f:
@@ -70,7 +70,7 @@ def run_stage5(template_smiles: str = None,
             monomer_names = list(monomer_library.keys())
 
     # Skip logic
-    result_file = out_path / "stage5_vip.json"
+    result_file = out_path / "stage6_vip.json"
     existing = {}
     if result_file.exists():
         with open(result_file) as f:
@@ -79,7 +79,7 @@ def run_stage5(template_smiles: str = None,
                   if isinstance(v, dict) and v.get("n_snapshots", 0) > 0}
 
     all_results = dict(existing)
-    logger.info(f"Stage 5: VIP rebinding for {monomer_names}")
+    logger.info(f"Stage 6: VIP rebinding for {monomer_names}")
     if skip_names:
         logger.info(f"  {len(skip_names)} already computed, skipping")
 
@@ -96,7 +96,7 @@ def run_stage5(template_smiles: str = None,
             result = _vip_for_monomer(
                 template_smiles, m_name, monomer_library[m_name],
                 interferent_library,
-                str(out_path.parent / "stage4" / m_name),
+                str(out_path.parent / "stage5" / m_name),
                 str(out_path / m_name),
             )
             all_results[m_name] = result
@@ -119,21 +119,21 @@ def run_stage5(template_smiles: str = None,
 # ═══════════════════════════════════════════════════════════════
 
 def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
-                      interferent_library, stage4_md_dir, output_dir):
+                      interferent_library, stage5_md_dir, output_dir):
     """Full VIP protocol for one monomer using GROMACS."""
     import MDAnalysis as mda
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    s4 = Path(stage4_md_dir)
+    s4 = Path(stage5_md_dir)
 
-    # Find Stage 4 trajectory
+    # Find Stage 5 trajectory
     traj = s4 / "md.xtc"
     top = s4 / "npt.gro"
     topol = s4 / "topol.top"
 
     if not traj.exists() or not top.exists():
-        raise FileNotFoundError(f"Stage 4 trajectory not found in {s4}")
+        raise FileNotFoundError(f"Stage 5 trajectory not found in {s4}")
 
     u = mda.Universe(str(top), str(traj))
     logger.info(f"  Trajectory: {len(u.trajectory)} frames, {u.atoms.n_atoms} atoms")
@@ -622,7 +622,7 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
 def _print_summary(all_results):
     """Print VIP summary."""
     logger.info(f"\n{'='*75}")
-    logger.info("Stage 5: VIP Cavity Rebinding Summary")
+    logger.info("Stage 6: VIP Cavity Rebinding Summary")
     logger.info(f"{'='*75}")
     logger.info(f"{'Monomer':<10} {'Removal':>10} {'Rebind':>10} {'Both':>10} "
                 f"{'Selectivity':>12} {'VIP Score':>10}")

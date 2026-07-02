@@ -108,8 +108,8 @@ def step_run_md(output_dir, monomer_names):
     logger.info("=" * 60)
     logger.info(f"Step 3: Running Stage 4 MD for {monomer_names}")
     logger.info("=" * 60)
-    from pipeline.stage4_md import run_stage4
-    results = run_stage4(
+    from pipeline.stage5_md import run_stage5
+    results = run_stage5(
         template_smiles=TEMPLATE_SMILES,
         monomer_names=monomer_names,
         monomer_library=MONOMER_LIBRARY,
@@ -185,8 +185,8 @@ def compute_all_rankings(output_dir):
     # Check multiple possible locations
     md_path = None
     for candidate in [
-        Path(output_dir) / "stage4" / "stage4_md.json",
-        Path(output_dir) / "stage4_md.json",
+        Path(output_dir) / "stage5" / "stage5_md.json",
+        Path(output_dir) / "stage5_md.json",
     ]:
         if candidate.exists():
             md_path = candidate

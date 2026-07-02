@@ -1,6 +1,6 @@
 # ESP-guided MIP Monomer Screening Pipeline
 
-Molecularly Imprinted Polymer(MIP) 합성을 위한 최적 functional monomer를 계산화학적으로 스크리닝하는 6-Stage 파이프라인.
+Molecularly Imprinted Polymer(MIP) 합성을 위한 최적 functional monomer를 계산화학적으로 스크리닝하는 7-Stage 파이프라인.
 
 ---
 
@@ -21,20 +21,29 @@ Stage 2: DFT 정밀 결합에너지 (GPU)
          ├── SP energy: def2-TZVP + PCM 용매
          └── BSSE counterpoise (gas-phase ghost atom)
     ↓ N개 (필터 없음)
-Stage 3: 선택도 평가 + Cross-linker 추천
-         ├── monomer-interferent xTB 도킹 → DFT 결합에너지
+Stage 3: 전역 Porogen 선택 + 선택도 평가 + Cross-linker 추천
+         ├── Global porogen 자동 선택 (top-k 평균 결합에너지 argmin
+         │         + protic H-bond 게이트 + 저유전율 tie-break) → 시스템 전역 고정
+         ├── (interferent 있음) monomer-interferent DFT 결합에너지 → S = exp(ΔE/kT)
+         ├── (interferent 없음) porogen 내 |결합에너지| 랭킹으로 대체
          ├── Cavity shape correction (분자 볼륨 기반)
-         ├── S = exp(ΔE / kT), Mukasa 2023 공식
          └── Cross-linker DFT 스크리닝 → 최적 cross-linker 추천
     ↓ N개 (필터 없음, 순위 참고)
-Stage 4: Pre-polymerization MD (GROMACS, GPU)
+Stage 4: MMSD 다중 monomer 조합 탐색
+         ├── 후보 pool = Stage 3 랭킹 상위 N (porogen 고정 후)
+         ├── template 중심 순차 xTB 도킹 (greedy / Bayesian / NSGA-II)
+         ├── synergy 판정: delta = mmsd_sum − smd_sum (<0 협동)
+         ├── 최적 crosslinker 선택 + chemistry diversity 필터
+         └── top polymer composition → stage4/mmsd_results.json
+    ↓ 조합 (Stage 5 MD로 전달)
+Stage 5: Pre-polymerization MD (GROMACS, GPU)
          ├── GAFF2 parameterization (acpype) + 보론 B→C 치환
-         ├── Template + N×monomer + TIP3P water
+         ├── Template + N×monomer (+ MMSD 조합) + TIP3P water
          ├── EM → NVT → NPT → 50ns Production MD
          ├── Contact frequency, RDF, EBN, H-bond 분석
          └── 합성 비율 자동 결정 (contact freq 역비례)
     ↓ N개 (필터 없음)
-Stage 5: VIP Cavity Rebinding (GROMACS)
+Stage 6: VIP Cavity Rebinding (GROMACS)
          ├── 균등 간격 3개 snapshot 선택 (cherry-picking 방지)
          ├── Monomer position restraint (1000 kJ/mol/nm²) → 중합 근사
          ├── Template removal test (10ns) → RMSD > 8Å = 이탈 성공
@@ -42,8 +51,8 @@ Stage 5: VIP Cavity Rebinding (GROMACS)
          ├── Interferent rebinding → graded selectivity 평가
          └── VIP score = rebind_rate × (1 + selectivity)
     ↓ VIP 순위
-Stage 6: 합성 레시피 자동 생성
-         ├── Top 3 monomer + cross-linker + 비율
+Stage 7: 합성 레시피 자동 생성
+         ├── Top 3 monomer + cross-linker + 비율 (+ 전역 porogen)
          └── 합성 프로토콜 (free-radical polymerization)
 ```
 
@@ -94,18 +103,33 @@ Stage 1에서 찾은 최적 복합체 구조를 DFT 레벨에서 정밀 계산�
 
 **ESP 시각화**: 3D vdW 표면 ESP 맵 (plotly interactive HTML + publication-quality PNG). 복합체 상태의 ESP도 생성하여 결합 부위 확인 가능.
 
-### Stage 3: 선택도 평가 + Cross-linker 추천
+### Stage 3: 전역 Porogen 선택 + 선택도 평가 + Cross-linker 추천
 
 **파일**: `code/pipeline/stage3_selectivity.py`
 
 각 monomer가 template에 얼마나 **선택적으로** 결합하는지 평가한다. 단순 결합 강도가 아닌, interferent 대비 선택도를 계산한다.
 
-**선택도 공식** (Mukasa 2023):
+**전역 Porogen 자동 선택** (`select_global_porogen`, `SOLVENT_STRATEGY="global_optimal"`):
+
+MIP는 **하나의 porogen**으로 중합되므로, 용매는 monomer별이 아니라 **시스템 전역에서 1개를 선택해 고정**해야 한다 (문헌 검증: van Wissen 2025; Vasapollo 2011). Stage 2가 template·monomer·complex를 **동일 PCM 유전율**에서 계산하므로, "가장 강한 결합 용매 선택"(Suryana 2021)과 "solvation 교란 최소화"(Liu 2021)가 동일한 저유전율 aprotic 답으로 수렴한다.
+
+알고리즘 (`per-solvent × per-monomer` BSSE 행렬 → porogen 1개):
+1. **T_k** = 용매평균 결합 상위 k(=`STAGE3_TOP_N`) monomer
+2. **Score(s)** = T_k 평균 결합에너지 → argmin (가장 음수)
+3. **Protic 하드 게이트** — H-bond MIP면 양성자성 용매(MeOH/물) 거부 (H-bond 파괴; Del Sole 2009)
+4. **유전율 tie-breaker** — Score 오차밴드(τ=1.0 kcal/mol) 내 **최저 ε** 선택 (H-bond 보존)
+5. **용해도 sanity** — 저유전율 porogen + 극성 template면 경고 + 고ε aprotic fallback 제시
+
+선택된 porogen은 `stage3/global_porogen.json`에 기록되어 **Stage 6 레시피**까지 일관 적용된다 (solvent memory).
+
+**선택도 공식** (Mukasa 2023, interferent가 있을 때):
 ```
-ΔE = |E(monomer-template)| - |E(monomer-interferent)|
+ΔE = |E(monomer-template)| - |E(monomer-interferent)|   (전역 porogen 내에서)
 S = exp(ΔE / kBT)
 양수 = template에 선택적
 ```
+
+**Interferent 없을 때**: 선택도 계산을 건너뛰고 **porogen 내 |결합에너지| 랭킹**으로 대체한다 (`INTERFERENT_LIBRARY = {}`).
 
 **Cavity shape correction**: interferent가 template보다 작으면 MIP cavity에 안정적으로 들어가지 못함을 반영.
 ```
@@ -118,11 +142,28 @@ E_Int_eff = E_Int × f_cavity + α × max(V_template - V_interferent, 0)
 
 **필터링 없음**: 모든 monomer를 Stage 4로 전달. 선택도는 참고 지표로만 사용.
 
-### Stage 4: Pre-polymerization MD (GROMACS)
+### Stage 4: MMSD 다중 monomer 조합 탐색
 
-**파일**: `code/pipeline/stage4_md.py`, `code/pipeline/utils_gromacs.py`
+**파일**: `code/pipeline/stage4_mmsd.py`
 
-Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한다.
+단일 monomer 순위를 넘어 **최적 monomer 조합**을 탐색한다. `Monomer_screening_in_Bio`의 MMSD (Rajpal 2024)를 이 프로젝트의 **template 중심 xTB 도킹**으로 이식한 것으로, 단백질 대신 template 소분자에 monomer를 하나씩 순차로 붙여 xTB 최적화한다.
+
+Stage 3에서 porogen을 고정하고 monomer 랭킹을 확정한 **뒤** 그 안에서 조합을 최적화하므로, 순서상 selectivity(3) → MMSD(4)가 맞다.
+
+- **후보 pool**: Stage 3 랭킹(`stage3_top.json`) 상위 N (없으면 SMD 결합 랭킹)
+- **탐색 엔진**: NSGA-II(기본, pymoo) / Bayesian(skopt) / greedy forward+swap — 자동 fallback
+- **순차 MMSD**: template에 monomer를 하나씩 붙여 xTB 최적화 → 복합체 결합에너지 누적
+- **Synergy 지표**: `delta = mmsd_sum − smd_sum` (<0 = 협동결합, >0 = 입체 간섭)
+- **목적함수**: `mmsd_per_monomer + 0.3·max(0, delta)` (크기 정규화)
+- **필터**: polymerization 호환성 + chemistry diversity(class ≥2, class당 ≤2) + 최적 crosslinker 순차 선택
+- 결과는 `stage4/mmsd_results.json`에 top polymer composition으로 저장 → Stage 5 MD가 이 조합을 사용
+- 설정: `MMSD_ENABLE`, `MMSD_OPTIMIZER`, `MMSD_CANDIDATE_POOL` 등 (config에서 `getattr`로 읽음)
+
+### Stage 5: Pre-polymerization MD (GROMACS)
+
+**파일**: `code/pipeline/stage5_md.py`, `code/pipeline/utils_gromacs.py`
+
+Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한다. Stage 4의 MMSD 조합이 있으면 그 조합으로 multi-monomer MD를 수행한다.
 
 **시스템 구성**:
 - GAFF2 force field (acpype Python API로 parameterization)
@@ -140,14 +181,14 @@ Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한
 
 **합성 비율 자동 결정**: Contact frequency의 역비례 — 약한 결합 monomer를 더 많이 넣어 균등한 cavity 형성.
 
-### Stage 5: VIP Cavity Rebinding (GROMACS)
+### Stage 6: VIP Cavity Rebinding (GROMACS)
 
-**파일**: `code/pipeline/stage5_vip.py`
+**파일**: `code/pipeline/stage6_vip.py`
 
-Virtually Imprinted Polymer (VIP) 방식으로 실제 MIP cavity 형성과 rebinding을 시뮬레이션한다 (Zink & Moura, PCCP 2018).
+Virtually Imprinted Polymer (VIP) 방식으로 실제 MIP cavity 형성과 rebinding을 시뮬레이션한다 (Zink & Moura, PCCP 2018). Stage 5 MD trajectory에서 snapshot을 선택한다.
 
 **프로토콜**:
-1. Stage 4 trajectory 후반 50%에서 **균등 간격 3개 snapshot** 선택
+1. Stage 5 MD trajectory 후반 50%에서 **균등 간격 3개 snapshot** 선택
 2. Monomer position restraint (1000 kJ/mol/nm²) → 중합 근사
 3. **Template removal test** (10ns): template RMSD > 8Å → 이탈 성공 (제거 가능)
 4. **Rebinding MD** (10ns): template 5Å 변위 후 release, RMSD < 5Å → cavity 인식 성공
@@ -176,11 +217,11 @@ VIP score = rebind_rate × (1 + selectivity)
 - Template/monomer 식별: resid 기반 (첫 번째 non-solvent residue = template)
 - acpype가 모든 분자에 "UNL" resname을 부여하므로 resname 대신 resid로 구분
 
-### Stage 6: 합성 레시피 자동 생성
+### Stage 7: 합성 레시피 자동 생성
 
-**파일**: `code/pipeline/stage6_recipe.py`
+**파일**: `code/pipeline/stage7_recipe.py`
 
-Stage 5 VIP 순위, Stage 4 합성 비율, Stage 3 cross-linker 추천을 종합하여 합성 프로토콜을 자동 생성한다.
+Stage 6 VIP 순위, Stage 5 합성 비율, Stage 4 MMSD 조합, Stage 3 cross-linker/porogen 추천을 종합하여 합성 프로토콜을 자동 생성한다.
 
 **출력**:
 - `synthesis_recipe.json`: Top 3 monomer + cross-linker + 비율
@@ -206,25 +247,31 @@ conda activate MIPscreen
 source /usr/local/gromacs-gpu/bin/GMXRC
 cd MIP_simulation
 
-# config.py에서 TEMPLATE_SMILES, MONOMER_LIBRARY 설정 후:
+# config.py에서 TEMPLATE_NAME(TEMPLATES 중 선택), MONOMER_LIBRARY 설정 후:
 
-# 전체 파이프라인 (Stage 1→2→3→4→5→6)
-python run_pipeline.py --stage all --output-dir results/hexanal
+# 전체 파이프라인 (Stage 1→2→3→4→5→6→7)
+# --output-dir 생략 시 자동으로 results/<TEMPLATE_NAME>/stage1..stage7 에 저장
+python run_pipeline.py --stage all
+#   → results/Gamma-terpinene/stage1, .../stage2, ...
 
-# 개별 Stage
-python run_pipeline.py --stage 1 --output-dir results/hexanal
-python run_pipeline.py --stage 4 --output-dir results/hexanal
-python run_pipeline.py --stage 5 --output-dir results/hexanal
+# 출력 위치 직접 지정도 가능
+python run_pipeline.py --stage all --output-dir results/g_terpinene
 
-# Template override (config.py 수정 없이)
-python run_pipeline.py --template "CCCCCCCCC=O" --stage all --output-dir results/nonanal
+# 개별 Stage (1 xTB, 2 DFT, 3 porogen+선택도, 4 MMSD, 5 MD, 6 VIP, 7 recipe)
+python run_pipeline.py --stage 1 --output-dir results/g_terpinene
+python run_pipeline.py --stage 4 --output-dir results/g_terpinene   # MMSD 조합 탐색
+python run_pipeline.py --stage 5 --output-dir results/g_terpinene   # MD
+python run_pipeline.py --stage 6 --output-dir results/g_terpinene   # VIP
+
+# Template override (SMILES만 교체; TEMPLATE_NAME은 config 유지)
+python run_pipeline.py --template "CC(=O)O" --stage all --output-dir results/acetic_acid
 
 # 추가 기능
-python run_pipeline.py --crosslinker --output-dir results/hexanal
+python run_pipeline.py --crosslinker --output-dir results/g_terpinene
 python run_pipeline.py --suggest-interferents
 python run_pipeline.py --auto-interferents
-python run_pipeline.py --report --output-dir results/hexanal
-python run_pipeline.py --predict-if --output-dir results/hexanal
+python run_pipeline.py --report --output-dir results/g_terpinene
+python run_pipeline.py --predict-if --output-dir results/g_terpinene
 
 # 실험 IF 데이터 업데이트
 python run_pipeline.py --update-if-model --monomer MAA --experimental-if 15
@@ -243,10 +290,11 @@ MIP_simulation/
 │   ├── run_pipeline.py          # Stage 오케스트레이터
 │   ├── stage1_xtb.py            # ESP 도킹 + xTB 스크리닝
 │   ├── stage2_dft.py            # DFT 결합에너지 + ESP 시각화
-│   ├── stage3_selectivity.py    # 선택도 + cross-linker
-│   ├── stage4_md.py             # GROMACS pre-polymerization MD
-│   ├── stage5_vip.py            # VIP cavity rebinding
-│   ├── stage6_recipe.py         # 합성 레시피
+│   ├── stage3_selectivity.py    # 전역 porogen 선택 + 선택도 + cross-linker
+│   ├── stage4_mmsd.py           # MMSD 다중 monomer 조합 탐색 (greedy/BO/NSGA-II)
+│   ├── stage5_md.py             # GROMACS pre-polymerization MD (MMSD 조합 사용)
+│   ├── stage6_vip.py            # VIP cavity rebinding
+│   ├── stage7_recipe.py         # 합성 레시피
 │   ├── utils_gromacs.py         # GROMACS 유틸리티 (parameterization, MD, 분석)
 │   ├── crosslinker.py           # Cross-linker DFT
 │   ├── generate_report.py       # HTML 리포트
@@ -259,8 +307,9 @@ MIP_simulation/
 │   ├── config_validation.py     # 검증 기준값
 │   └── validate_*.py            # 각종 검증
 └── results/
-    ├── hexanal/stage1~6/        # Hexanal 결과
-    ├── nonanal/stage1~6/        # Nonanal 결과
+    ├── g_terpinene/stage1~7/    # Gamma-terpinene 결과
+    ├── acetic_acid/stage1~7/    # Acetic acid 결과
+    ├── methyl_benzoate/stage1~7/# Methyl benzoate 결과
     └── validation/              # 검증 결과
 ```
 
@@ -270,10 +319,13 @@ MIP_simulation/
 
 | 항목 | 값 |
 |------|-----|
-| Template | Hexanal (`CCCCCC=O`) |
-| Monomers (11) | MAA, MAAD, 4VP, OPD, ACM, PYR, 4VB, APB, Styrene, AA, NVP |
-| Interferents (3) | Acetic acid, Ethanol, Acetone |
-| Solvent | Acetonitrile (ε=35.69) |
+| Template 후보 (`TEMPLATES`) | Gamma-terpinene (`CC1=CCC(=CC1)C(C)C`), Acetic Acid (`CC(=O)O`), Methyl Benzoate (`COC(=O)c1ccccc1`) |
+| 활성 Template | `TEMPLATE_NAME` 로 선택 (기본 Gamma-terpinene) |
+| Monomers (16) | MAA, MAAD, 4VP, OPD, ACM, PYR, 4VB, APB, Styrene, AA, NVP, **ITA, 2VP, VIM, NIPAM, 4VBA** |
+| Interferents | 없음 (이번 스크리닝 비활성 — Stage 3는 결합에너지 랭킹으로 대체) |
+| Solvents (porogen 후보) | Chloroform (ε=4.71), Acetonitrile (ε=35.69), Toluene (ε=2.38) |
+| Porogen 전략 | `global_optimal` — 전역 최적 porogen 1개 자동 선택·고정 |
+| Cross-linker | EGDMA, DVB, TRIM, BAM |
 | Workers | 11 (CPU), 1 (GPU) |
 
 ---
@@ -289,17 +341,21 @@ MIP_simulation/
 | 2 | 범함수 | ωB97XD / ωB97M-V (적응형) | H-bond/분산력 시스템별 최적 |
 | 2 | 기저함수 | def2-SVP (opt) / def2-TZVP (SP) | 2단계 기저 (속도+정확도) |
 | 2 | 용매 모델 | PCM (IEF-PCM) | GPU gradient 지원 (ddCOSMO 불가) |
+| 3 | Porogen 전략 | `global_optimal` (top-k 평균 결합 argmin) | 단일 porogen 중합 (van Wissen 2025) |
+| 3 | Porogen tie band (τ) | 1.0 kcal/mol → 최저 ε | DFT+PCM 오차 내 H-bond 보존 |
 | 3 | Cavity α | 0.10 kcal/(mol·Å³) | vdW 에너지 밀도 기반 물리 상수 |
 | 3 | Cavity β | 0.5 | 비선형 cavity filling (표면적 ∝ V^(2/3)) |
-| 4 | Force field | GAFF2 (acpype Python API) | 소분자 표준 |
-| 4 | 보론 파라미터 | B→C 치환 + 문헌값 | Gerogiokas 2020 |
-| 4 | MD 시간 | 50 ns | 평형 도달 |
-| 4 | Template:monomer 비율 | 1:4 | 고정 |
-| 5 | Snapshot | 균등 간격 3개 | Cherry-picking 방지 (Zink 2018) |
-| 5 | Position restraint | 1000 kJ/mol/nm² | 중합 근사 |
-| 5 | Rebinding 기준 | RMSD < 5 Å | Cavity 인식 성공 |
-| 5 | Removal 기준 | RMSD > 8 Å | Template 이탈 (제거 가능) |
-| 5 | Scoring | rebind_rate × (1 + graded selectivity) | 소분자 template 최적화 |
+| 4 | MMSD optimizer | NSGA-II / Bayesian / greedy | 조합 탐색 (Rajpal 2024) |
+| 4 | MMSD 목적함수 | mmsd_per_monomer + 0.3·max(0,Δ) | synergy/interference 크기 정규화 |
+| 5 | Force field | GAFF2 (acpype Python API) | 소분자 표준 |
+| 5 | 보론 파라미터 | B→C 치환 + 문헌값 | Gerogiokas 2020 |
+| 5 | MD 시간 | 50 ns | 평형 도달 |
+| 5 | Template:monomer 비율 | 1:4 | 고정 |
+| 6 | Snapshot | 균등 간격 3개 | Cherry-picking 방지 (Zink 2018) |
+| 6 | Position restraint | 1000 kJ/mol/nm² | 중합 근사 |
+| 6 | Rebinding 기준 | RMSD < 5 Å | Cavity 인식 성공 |
+| 6 | Removal 기준 | RMSD > 8 Å | Template 이탈 (제거 가능) |
+| 6 | Scoring | rebind_rate × (1 + graded selectivity) | 소분자 template 최적화 |
 
 ---
 
@@ -317,13 +373,15 @@ MIP_simulation/
 | geomeTRIC optimizer | geometric [15] | Wang & Song 2016 | 2 |
 | AutoDock Vina docking | vina + meeko [14] | Trott & Olson 2010 | 1 |
 | Selectivity S ∝ exp(ΔE/kT) | numpy | Mukasa et al. 2023 [1] | 3 |
+| Global porogen 선택 | numpy + RDKit | van Wissen 2025 [19], Suryana 2021 [20], Liu 2021 [21], Del Sole 2009 [22] | 3 |
 | Cavity shape correction | RDKit (ComputeMolVolume) | 본 연구 (vdW 에너지 밀도 기반) | 3 |
-| GAFF2 parameterization | acpype [18] + AmberTools | Wang et al. 2004 | 4 |
-| Boron B→C substitution | acpype [18] + custom frcmod | Gerogiokas et al. 2020 [10] | 4 |
-| Pre-polymerization MD | GROMACS [13] GPU | Muñoz et al. 2024 [4] | 4 |
-| Contact frequency / EBN | MDAnalysis [16] | Ye et al. 2024 [5] | 4 |
-| H-bond analysis | MDAnalysis [16] (HydrogenBondAnalysis) | — | 4 |
-| VIP cavity rebinding | GROMACS [13] + MDAnalysis [16] | Zink & Moura 2018 [3] | 5 |
+| MMSD 조합 탐색 (greedy/BO/NSGA-II) | pymoo + skopt + tblite | Rajpal et al. 2024 [23], Deb 2002 | 4 |
+| GAFF2 parameterization | acpype [18] + AmberTools | Wang et al. 2004 | 5 |
+| Boron B→C substitution | acpype [18] + custom frcmod | Gerogiokas et al. 2020 [10] | 5 |
+| Pre-polymerization MD | GROMACS [13] GPU | Muñoz et al. 2024 [4] | 5 |
+| Contact frequency / EBN | MDAnalysis [16] | Ye et al. 2024 [5] | 5 |
+| H-bond analysis | MDAnalysis [16] (HydrogenBondAnalysis) | — | 5 |
+| VIP cavity rebinding | GROMACS [13] + MDAnalysis [16] | Zink & Moura 2018 [3] | 6 |
 
 ---
 
@@ -344,6 +402,7 @@ python -c "import gpu4pyscf; print('gpu4pyscf OK')"
 python -c "import MDAnalysis; print('MDAnalysis OK')"
 python -c "import openmm; print('OpenMM OK')"
 python -c "from vina import Vina; print('Vina OK')"
+python -c "import pymoo, skopt; print('MMSD optimizers OK')"   # NSGA-II / Bayesian
 gmx --version
 ```
 
@@ -383,9 +442,9 @@ gmx --version
 |---|------|------|------|-----|---------------|
 | 1 | Mukasa et al. | *Adv. Mater.* | 2023 | 10.1002/adma.202212161 | Stage 3 선택도 공식 S ∝ exp(ΔE/kBT), 다단계 스크리닝 전략 |
 | 2 | Singh et al. | *Curr. Anal. Chem.* | 2012 | 10.2174/157341112803216807 | DFT MIP 스크리닝 원형, BSSE 보정, 실험 IF 검증 데이터 |
-| 3 | Zink & Moura | *Phys. Chem. Chem. Phys.* | 2018 | 10.1039/c7cp08284c | Stage 5 VIP cavity rebinding (position restraint, template removal, rebinding MD) |
-| 4 | Muñoz et al. | *J. Chem. Inf. Model.* | 2024 | 10.1021/acs.jcim.4c00775 | Stage 4 pre-polymerization MD, contact frequency, monomer 선별 |
-| 5 | Ye et al. | *Molecules* | 2024 | 10.3390/molecules29174236 | Stage 4 EBN/HBNmax 정량 파라미터, H-bond 점유율 분석 |
+| 3 | Zink & Moura | *Phys. Chem. Chem. Phys.* | 2018 | 10.1039/c7cp08284c | Stage 6 VIP cavity rebinding (position restraint, template removal, rebinding MD) |
+| 4 | Muñoz et al. | *J. Chem. Inf. Model.* | 2024 | 10.1021/acs.jcim.4c00775 | Stage 5 pre-polymerization MD, contact frequency, monomer 선별 |
+| 5 | Ye et al. | *Molecules* | 2024 | 10.3390/molecules29174236 | Stage 5 EBN/HBNmax 정량 파라미터, H-bond 점유율 분석 |
 
 ### 계산화학 방법론
 
@@ -396,6 +455,19 @@ gmx --version
 | 8 | Boys & Bernardi | *Mol. Phys.* | 1970 | 10.1080/00268977000101561 | BSSE counterpoise 보정 (gas-phase ghost atom) |
 | 9 | Bursch et al. | *Angew. Chem. Int. Ed.* | 2022 | 10.1002/anie.202205735 | DFT best-practice: def2-TZVP 기저, 적응형 범함수 근거 |
 | 10 | Gerogiokas et al. | *Molecules* | 2020 | 10.3390/molecules25092196 | 보론산 GAFF2 파라미터화 (B→C 치환 + 문헌 파라미터) |
+
+### Porogen 선택 & MMSD 조합 탐색 (2026 추가)
+
+리서치 워크플로우로 조사·교차검증한 문헌 (14/14 주장 검증 통과).
+
+| # | 저자 | 저널 | 년도 | DOI / URL | 파이프라인 적용 |
+|---|------|------|------|-----------|---------------|
+| 19 | van Wissen et al. | *Polymers* | 2025 | PMC12030623 | Stage 3 porogen 선택 원리 (proticity 우선, 저유전율 aprotic이 H-bond 보존, dissolve-all 원칙, solvent memory, 단일 formulation 결정) |
+| 20 | Suryana et al. | *Molecules* | 2021 | 10.3390/molecules26071891 | DFT+PCM 표준 워크플로우: 최강(가장 음수) 결합 용매 선택 (maximize-interaction 진영) |
+| 21 | Liu et al. | *Polymers* | 2021 | 10.3390/polym13162657 | solvation 교란 최소화 기준 (두 진영이 동일 저유전율 답으로 수렴하는 근거) |
+| 22 | Del Sole et al. | *Molecules* | 2009 | 10.3390/molecules14072632 | 실험+DFT 직접 증거: nicotinamide/MAA가 chloroform은 선택적, acetonitrile은 결합 無 |
+| 23 | (MMSD, Refaat et al.) | *Sci. Rep.* | 2024 | 10.1038/s41598-024-73114-3 | Stage 4 MMSD 조합 탐색 원형 (`Monomer_screening_in_Bio/phase3_mmsd.py`에서 이식) |
+| 24 | Rosengren et al. | *Biosens. Bioelectron.* | 2009 | 10.1016/j.bios.2009.06.042 | 유전상수만으로 불충분 — proticity/H-bond 능력은 별개 축 (PCA) |
 
 ### 소프트웨어
 

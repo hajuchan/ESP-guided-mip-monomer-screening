@@ -38,12 +38,13 @@ def parse_args():
     )
     parser.add_argument(
         "--stage", type=str, default="all",
-        choices=["1", "2", "3", "4", "5", "6", "all"],
+        choices=["1", "2", "3", "4", "5", "6", "7", "all"],
         help="Which stage to run (default: all)"
     )
     parser.add_argument(
-        "--output-dir", type=str, default=OUTPUT_DIR,
-        help=f"Output directory (default: {OUTPUT_DIR})"
+        "--output-dir", type=str, default=None,
+        help=("Output directory. Default: <results>/<TEMPLATE_NAME> "
+              "(stage1..stage7 nested inside).")
     )
     # Feature 5: Cross-linker screening
     parser.add_argument(
@@ -124,26 +125,34 @@ def run_stage(stage_num: int, template_smiles: str, output_dir: str,
         result = {"top_selective": top_monomers}
 
     elif stage_num == 4:
-        from .stage4_md import run_stage4
+        from .stage4_mmsd import run_stage4
+        mmsd_result = run_stage4(
+            template_smiles=template_smiles,
+            output_dir=_stage_dir(output_dir, "stage4"),
+        )
+        result = {"mmsd": mmsd_result}
+
+    elif stage_num == 5:
+        from .stage5_md import run_stage5
         monomer_names = prev_results.get("top_selective")
-        md_results = run_stage4(
+        md_results = run_stage5(
             template_smiles=template_smiles,
             monomer_names=monomer_names,
-            output_dir=_stage_dir(output_dir, "stage4"),
+            output_dir=_stage_dir(output_dir, "stage5"),
         )
         result = {"md_results": md_results}
 
-    elif stage_num == 5:
-        from .stage5_vip import run_stage5
-        vip_results = run_stage5(
+    elif stage_num == 6:
+        from .stage6_vip import run_stage6
+        vip_results = run_stage6(
             template_smiles=template_smiles,
-            output_dir=_stage_dir(output_dir, "stage5"),
+            output_dir=_stage_dir(output_dir, "stage6"),
         )
         result = {"vip_results": vip_results}
 
-    elif stage_num == 6:
-        from .stage6_recipe import run_stage6
-        recipe = run_stage6(output_dir=_stage_dir(output_dir, "reports"))
+    elif stage_num == 7:
+        from .stage7_recipe import run_stage7
+        recipe = run_stage7(output_dir=_stage_dir(output_dir, "reports"))
         result = {"recipe": recipe}
 
     elapsed = time.time() - t0
@@ -178,7 +187,7 @@ def print_summary(output_dir: str):
             .to_dict()
         )
 
-    s4 = out / "stage4" / "stage4_md.json"
+    s4 = out / "stage5" / "stage5_md.json"
     if s4.exists():
         with open(s4) as f:
             md_list = json.load(f)
@@ -227,7 +236,14 @@ def print_summary(output_dir: str):
 def main():
     args = parse_args()
 
-    out_dir = args.output_dir
+    # Default output dir = <results>/<TEMPLATE_NAME>, with stage1..stage7 nested.
+    if args.output_dir:
+        out_dir = args.output_dir
+    else:
+        from .config import OUTPUT_DIR as _ROOT, TEMPLATE_NAME
+        safe_name = TEMPLATE_NAME.strip().replace(" ", "_").replace("/", "_")
+        out_dir = str(Path(_ROOT) / safe_name)
+
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     (Path(out_dir) / "reports").mkdir(parents=True, exist_ok=True)
 
@@ -285,7 +301,7 @@ def main():
     prev_results = {}
 
     if args.stage == "all":
-        stages = [1, 2, 3, 4, 5, 6]
+        stages = [1, 2, 3, 4, 5, 6, 7]
     else:
         stages = [int(args.stage)]
 

@@ -1,0 +1,95 @@
+{
+  "pdb_id": "8F76",
+  "ligand": "Propionate (PPI)",
+  "ligand_center": [
+    119.82239999999999,
+    112.9934,
+    80.5226
+  ],
+  "pocket_residues": [
+    {
+      "resname": "HIS",
+      "resnum": 104,
+      "min_dist_A": 4.15,
+      "closest_atom": "ND1"
+    },
+    {
+      "resname": "PHE",
+      "resnum": 155,
+      "min_dist_A": 3.95,
+      "closest_atom": "CD1"
+    },
+    {
+      "resname": "LEU",
+      "resnum": 158,
+      "min_dist_A": 4.28,
+      "closest_atom": "CD1"
+    },
+    {
+      "resname": "HIS",
+      "resnum": 180,
+      "min_dist_A": 3.56,
+      "closest_atom": "ND1"
+    },
+    {
+      "resname": "GLN",
+      "resnum": 181,
+      "min_dist_A": 3.1,
+      "closest_atom": "NE2"
+    },
+    {
+      "resname": "ASN",
+      "resnum": 194,
+      "min_dist_A": 4.56,
+      "closest_atom": "O"
+    },
+    {
+      "resname": "GLY",
+      "resnum": 198,
+      "min_dist_A": 3.52,
+      "closest_atom": "CA"
+    },
+    {
+      "resname": "LEU",
+      "resnum": 199,
+      "min_dist_A": 4.53,
+      "closest_atom": "N"
+    },
+    {
+      "resname": "ALA",
+      "resnum": 201,
+      "min_dist_A": 4.6,
+      "closest_atom": "CB"
+    },
+    {
+      "resname": "ILE",
+      "resnum": 202,
+      "min_dist_A": 4.16,
+      "closest_atom": "CG1"
+    },
+    {
+      "resname": "SER",
+      "resnum": 258,
+      "min_dist_A": 4.52,
+      "closest_atom": "CB"
+    },
+    {
+      "resname": "ARG",
+      "resnum": 262,
+      "min_dist_A": 3.2,
+      "closest_atom": "NH1"
+    }
+  ],
+  "key_residues": {
+    "anchor": "R262 (TM6, position 6x59)",
+    "gates": [
+      "F155 (TM4, 4x57)",
+      "L158 (TM4, 4x60)"
+    ],
+    "activation": [
+      "F250 (6x47)",
+      "Y251 (6x48)"
+    ]
+  },
+  "pocket_volume_A3_convex": 460.8
+}

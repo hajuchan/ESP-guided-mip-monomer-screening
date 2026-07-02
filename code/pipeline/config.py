@@ -6,8 +6,17 @@ computational screening of functional monomers.
 """
 
 # ── Template ─────────────────────────────────────────────────────────
-TEMPLATE_NAME = "Hexanal" 
-TEMPLATE_SMILES = "CCCCCC=O"  
+# Candidate screening targets (this run does one at a time).
+TEMPLATES = {
+    "Gamma-terpinene": "CC1=CCC(=CC1)C(C)C",   # C10H16 monoterpene
+    "Acetic Acid":     "CC(=O)O",              # C2H4O2
+    "Methyl Benzoate": "COC(=O)c1ccccc1",      # C8H8O2
+}
+# Active target for THIS run. Stage modules do `from .config import
+# TEMPLATE_SMILES / TEMPLATE_NAME`, so these two names must exist.
+# To screen another target, change the key below (or pass --template SMILES).
+TEMPLATE_NAME = "Gamma-terpinene"
+TEMPLATE_SMILES = TEMPLATES[TEMPLATE_NAME]
 
 # ── Monomer Library ──────────────────────────────────────────────────
 # {name: SMILES}  — covers common MIP functional monomers
@@ -23,19 +32,31 @@ MONOMER_LIBRARY = {
     "Styrene": "C=Cc1ccccc1",            # Styrene
     "AA":      "C=CC(=O)O",              # Acrylic acid
     "NVP":     "C=CN1CCCC1=O",           # N-Vinylpyrrolidone
+    # ── Extended screening candidates ────────────────────────────────
+    "ITA":     "C=C(CC(=O)O)C(=O)O",     # Itaconic acid (acidic)
+    "2VP":     "C=Cc1ccccn1",            # 2-Vinylpyridine (basic)
+    "VIM":     "C=Cn1ccnc1",             # 1-Vinylimidazole (basic)
+    "NIPAM":   "C=CC(=O)NC(C)C",         # N-Isopropylacrylamide (neutral)
+    "4VBA":    "C=Cc1ccc(C(=O)O)cc1",    # 4-Vinylbenzoic acid (hydrophobic π-π / acidic)
 }
 
 # ── Interferent Library ──────────────────────────────────────────────
+# Disabled for this screening (no selectivity comparison this round).
+# When empty, Stage 3 skips selectivity and ranks by |DFT binding energy|.
+# Re-enable by adding {name: SMILES} entries.
 INTERFERENT_LIBRARY = {
-    "Acetic Acid":    "CC(=O)O",
-    "Ethanol":      "CCO",
-    "Acetone":     "CC(=O)C",
+    # "Acetic Acid":    "CC(=O)O",
+    # "Ethanol":      "CCO",
+    # "Acetone":     "CC(=O)C",
 }
 
 # ── Solvents (name → dielectric constant ε) ─────────────────────────
 # Values from PySCF ddCOSMO / standard references  [Lipparini2013]
 SOLVENTS = {
+    "Chloroform":   4.71,
     "Acetonitrile": 35.69,
+    # "MeOH":         32.61,
+    "Toluene":      2.38,
 }
 
 # ── Pipeline Parameters ─────────────────────────────────────────────
@@ -52,8 +73,10 @@ OUTPUT_DIRS = {
     "stage1":     f"{OUTPUT_DIR}/stage1",
     "stage2":     f"{OUTPUT_DIR}/stage2",
     "stage3":     f"{OUTPUT_DIR}/stage3",
-    "stage4":     f"{OUTPUT_DIR}/stage4",
-    "stage5":     f"{OUTPUT_DIR}/stage5",
+    "stage4":     f"{OUTPUT_DIR}/stage4",   # MMSD combination search
+    "stage5":     f"{OUTPUT_DIR}/stage5",   # pre-polymerization MD
+    "stage6":     f"{OUTPUT_DIR}/stage6",   # VIP cavity rebinding
+    "stage7":     f"{OUTPUT_DIR}/stage7",   # synthesis recipe
     "features":   f"{OUTPUT_DIR}/features",
     "validation": f"{OUTPUT_DIR}/validation",
     "reports":    f"{OUTPUT_DIR}/reports",
@@ -77,7 +100,7 @@ TEMPERATURE = 298.15        # K
 
 # Feature 1: QuantumDock 분자 도킹 (Mukasa et al. 2023)
 # 분자 표면 전체에서 orientation 생성 + GFN2-xTB SP 스크리닝
-ENSEMBLE_DOCKING = False      # True: dock multiple monomer conformers, take best
+ENSEMBLE_DOCKING = True      # True: dock multiple monomer conformers, take best
 N_DOCK_ORIENTATIONS = 200    # monomer당 기본 docking 방향 수 (적응형으로 자동 스케일)
 N_TOP_FOR_OPTIMIZATION = 10  # SP 스크리닝 후 full optimization 대상 수
 DOCK_SURFACE_OFFSET = 2.5    # vdW 표면에서 monomer 중심까지 거리 (Angstrom)
@@ -99,13 +122,23 @@ DFT_SP_BASIS   = "def2-tzvp"   # single-point energy용 (정확)
 DFT_RELAX_HEAVY_THRESHOLD = 25  # 이 이상의 heavy atom 수에서 DFT relaxation 수행
 DFT_RELAX_STEPS = 5              # partial optimization 스텝 수
 
-# Feature 2: 용매 선택 전략
-SOLVENT_STRATEGY = "synthesis_match"
+# Feature 2: 용매(porogen) 선택 전략
+SOLVENT_STRATEGY = "global_optimal"
+# "global_optimal"  — 시스템 전역에서 최적 porogen 1개를 자동 선택 후 고정 (권장)
+#                     top-k(=STAGE3_TOP_N) 평균 결합에너지 argmin + protic 게이트
+#                     + 저유전율 tie-breaker. MIP는 한 porogen으로 중합하므로
+#                     monomer별이 아닌 시스템 단위 선택이 맞음.
+#                     [van Wissen 2025; Vasapollo 2011; Suryana 2021; Liu 2021;
+#                      Del Sole 2009; Rosengren 2009]
 # "synthesis_match" — SYNTHESIS_SOLVENT 용매의 결합에너지 사용 (Mukasa 2023)
-# "minimum"         — 가장 음수인 결합에너지 (최대 결합력 기준)
+# "minimum"         — (비권장, 물리적으로 부적절) monomer별 최강 결합 용매
 # "average"         — 전 용매 평균
 # "worst"           — 가장 약한 결합에너지 (보수적 평가)
-SYNTHESIS_SOLVENT = "Acetonitrile"
+SYNTHESIS_SOLVENT = "Acetonitrile"   # global_optimal 실패/미설정 시 fallback
+
+# global_optimal tunables
+POROGEN_TIE_TAU = 1.0        # kcal/mol — Score tie band (DFT+PCM 오차 범위)
+POROGEN_LOW_EPS_WARN = 3.0   # ε 이 값 미만 + 극성 template면 용해도 경고
 
 # Feature: Cavity Shape Selectivity (Stage 3)
 # MIP cavity의 3D 형상 선택성을 반영하는 보정
@@ -126,7 +159,7 @@ def compute_molecular_volume(smiles: str) -> float:
 
 
 # Feature 3: Template:Monomer 비율 스크리닝
-MD_RATIO_SCREENING = False      # True면 비율별 스크리닝
+MD_RATIO_SCREENING = True      # True면 비율별 스크리닝
 MD_RATIOS_TO_TEST = [1, 2, 4]   # 테스트할 비율 목록
 MD_TEMPLATE_MONOMER_RATIO = 4   # 고정 비율 (MD_RATIO_SCREENING=False 시)
 
@@ -136,9 +169,9 @@ MD_CONTACT_CUTOFF = 6.0      # Å, contact frequency cutoff
 MD_BOX_SIZE = 4.0            # nm, initial box size
 MD_TEMPERATURE = 298.15      # K, simulation temperature
 MD_SOLVENT = "water"         # "water" (TIP3P) or "acetonitrile" (GAFF2 explicit)
-MD_INCLUDE_CROSSLINKER = False   # True: add cross-linker to MD system (Ye 2024)
+MD_INCLUDE_CROSSLINKER =True   # True: add cross-linker to MD system (Ye 2024)
 MD_CROSSLINKER_RATIO = 20       # cross-linker:template molar ratio
-MD_MULTI_MONOMER = False         # True: include all top monomers in one simulation
+MD_MULTI_MONOMER = True         # True: include all top monomers in one simulation
 MD_MULTI_MONOMER_TOP_N = 3       # Number of top monomers to include in multi-monomer MD
 
 # ── Stage 5: VIP Parameters ──
@@ -159,5 +192,5 @@ CROSSLINKER_LIBRARY = {
     "TRIM":  "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
     "BAM":   "C=CC(=O)NCCNC(=O)C=C",
 }
-CROSSLINKER_SCREENING = False
+CROSSLINKER_SCREENING = True  # True면 cross-linker 후보 스크리닝
 CROSSLINKER_THRESHOLD = -1.0  # kcal/mol — 이보다 강하면 부적합 경고

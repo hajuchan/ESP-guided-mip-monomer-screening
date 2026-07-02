@@ -290,8 +290,8 @@ def _build_stage3(out: pathlib.Path) -> str:
 
 def _build_stage4(out: pathlib.Path) -> str:
     """Section 5 — MD results: EBN / H-bond table + RDF graph."""
-    md_data = _load_json(out / "stage4" / "stage4_md.json")
-    rdf_uri = _embed_image(out / "stage4" / "stage4_rdf.png")
+    md_data = _load_json(out / "stage5" / "stage5_md.json")
+    rdf_uri = _embed_image(out / "stage5" / "stage5_rdf.png")
 
     if md_data is None and rdf_uri is None:
         return _section("Stage 4 — MD Validation", _not_executed())
@@ -334,7 +334,7 @@ def _build_stage4(out: pathlib.Path) -> str:
             f'<img class="plot" src="{rdf_uri}" alt="RDF Plot"/>')
 
     # XVG inline plots for each monomer's MD trajectory
-    stage4_dir = out / "stage4"
+    stage4_dir = out / "stage5"
     if stage4_dir.is_dir():
         xvg_plots = []
         for mono_dir in sorted(stage4_dir.iterdir()):
@@ -419,7 +419,7 @@ def _build_esp_gallery(out: pathlib.Path) -> str:
 def _build_recommendations(out: pathlib.Path) -> str:
     """Section 8 — Final recommendations."""
     dft_data = _load_json(out / "stage2" / "stage2_dft.json")
-    md_data = _load_json(out / "stage4" / "stage4_md.json")
+    md_data = _load_json(out / "stage5" / "stage5_md.json")
     cl_data = _load_json(out / "features" / "crosslinker.json")
     csv_rows = _load_csv(out / "stage3" / "stage3_selectivity.csv")
 
@@ -612,7 +612,7 @@ def _build_selectivity_matrix(out):
 
 def _build_stage5_section(out):
     """Build Stage 5 VIP rebinding section for HTML report."""
-    vip_path = out / "stage5" / "stage5_vip.json"
+    vip_path = out / "stage6" / "stage6_vip.json"
     if not vip_path.exists():
         return ""
 

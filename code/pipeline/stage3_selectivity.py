@@ -31,6 +31,8 @@ from .config import (
     OUTPUT_DIRS,
     SOLVENT_STRATEGY,
     SYNTHESIS_SOLVENT,
+    STAGE3_TOP_N,
+    HBOND_DOMINANCE_THRESHOLD,
     CAVITY_CORRECTION,
     CAVITY_ALPHA,
     CAVITY_BETA,
@@ -41,12 +43,174 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [Stage3] %(message)s
 logger = logging.getLogger(__name__)
 
 
-def aggregate_solvent_energy(solvent_data: dict, strategy: str = None) -> tuple:
+# ── Global porogen selection (single optimal solvent, fixed system-wide) ──
+# Literature-grounded (van Wissen 2025; Vasapollo 2011; Del Sole 2009;
+# Suryana 2021; Liu 2021; Rosengren 2009): a MIP polymerises in ONE porogen,
+# so the solvent is a formulation-level (global) choice — NOT per monomer.
+# Because Stage 2 evaluates template+monomer+complex in the SAME PCM dielectric,
+# the strongest (most-negative) in-solvent BSSE binding coincides with the
+# least-screened, lowest-ε aprotic porogen — the two literature camps converge.
+try:
+    from .config import POROGEN_TIE_TAU          # kcal/mol tie band (DFT+PCM noise)
+except ImportError:
+    POROGEN_TIE_TAU = 1.0
+try:
+    from .config import POROGEN_LOW_EPS_WARN     # ε below which polar templates get a solubility flag
+except ImportError:
+    POROGEN_LOW_EPS_WARN = 3.0
+
+# Protic solvents disrupt template–monomer H-bonds → hard-gated for H-bond MIPs.
+_PROTIC_SOLVENTS = {
+    "water", "h2o", "methanol", "meoh", "ethanol", "etoh", "n-propanol",
+    "propanol", "1-propanol", "2-propanol", "isopropanol", "ipa",
+    "n-butanol", "butanol", "formic acid", "acetic acid", "formamide",
+    "ethylene glycol", "glycerol",
+}
+
+
+def _is_protic(solvent_name: str) -> bool:
+    return solvent_name.strip().lower() in _PROTIC_SOLVENTS
+
+
+def select_global_porogen(template_dft: dict, solvents: dict,
+                          template_smiles: str = None, k: int = None) -> tuple:
+    """Pick ONE global porogen from the per-solvent × per-monomer BSSE matrix.
+
+    Algorithm (literature-grounded — see refs above):
+      0. matrix hygiene: solvents present for the candidate monomers
+      1. regime: H-bond-driven vs dispersion (template + best monomer, HBD+HBA)
+      2. T_k = top-k monomers by solvent-averaged binding (k=STAGE3_TOP_N)
+      3. Score(s) = mean over T_k of E[m][s]  (more negative = stronger)
+      4. argmin Score; if H-bond-driven, HARD-GATE out protic solvents
+      5. dielectric tie-breaker: within Score-tie band pick LOWEST ε
+      6. solubility sanity flag for very low-ε porogen + polar template
+      7. k=1 cross-check (single best complex)
+
+    Returns (porogen_name, info_dict).
+    """
+    from rdkit import Chem
+    from rdkit.Chem import Lipinski
+
+    template_smiles = template_smiles or TEMPLATE_SMILES
+    k = k or STAGE3_TOP_N
+
+    # STEP 0: build E[m][s] matrix from bsse_dE
+    monomers = list(template_dft.keys())
+    E = {}
+    for m in monomers:
+        E[m] = {}
+        for s, v in template_dft[m].items():
+            if isinstance(v, dict) and v.get("bsse_dE") is not None:
+                try:
+                    E[m][s] = float(v["bsse_dE"])
+                except (TypeError, ValueError):
+                    pass
+    monomers = [m for m in monomers if E[m]]
+    if not monomers:
+        return (SYNTHESIS_SOLVENT, {"error": "no binding-energy matrix"})
+    # solvents present for every candidate monomer (comparable set); else union
+    solvent_names = [s for s in solvents if all(s in E[m] for m in monomers)]
+    if not solvent_names:
+        alls = set()
+        for m in monomers:
+            alls.update(E[m].keys())
+        solvent_names = sorted(alls)
+    if not solvent_names:
+        return (SYNTHESIS_SOLVENT, {"error": "no solvent data"})
+
+    # STEP 2: T_k by solvent-averaged binding (avoids circularity)
+    Ebar = {m: sum(E[m][s] for s in solvent_names if s in E[m])
+               / len([s for s in solvent_names if s in E[m]])
+            for m in monomers if any(s in E[m] for s in solvent_names)}
+    ranked = sorted(Ebar, key=Ebar.get)          # most negative first
+    T_k = ranked[:max(1, k)]
+    m1 = ranked[0]
+
+    # STEP 3: Score(s) = top-k mean; Score1 = k=1 cross-check
+    Score = {}
+    for s in solvent_names:
+        vals = [E[m][s] for m in T_k if s in E[m]]
+        if vals:
+            Score[s] = sum(vals) / len(vals)
+    Score1 = {s: E[m1][s] for s in solvent_names if s in E[m1]}
+    if not Score:
+        return (solvent_names[0], {"error": "no scores", "porogen": solvent_names[0]})
+
+    # STEP 1: regime (template + best monomer H-bond count)
+    n_hb = 0
+    t_mol = Chem.MolFromSmiles(template_smiles) if template_smiles else None
+    if t_mol is not None:
+        n_hb += Lipinski.NumHDonors(t_mol) + Lipinski.NumHAcceptors(t_mol)
+    m1_smiles = MONOMER_LIBRARY.get(m1)
+    m1_mol = Chem.MolFromSmiles(m1_smiles) if m1_smiles else None
+    if m1_mol is not None:
+        n_hb += Lipinski.NumHDonors(m1_mol) + Lipinski.NumHAcceptors(m1_mol)
+    hbond_driven = n_hb >= HBOND_DOMINANCE_THRESHOLD
+
+    # STEP 4: primary pick + protic hard gate
+    candidates = list(Score.keys())
+    s_raw = min(candidates, key=Score.get)
+    gate_applied = False
+    if hbond_driven:
+        aprotic = [s for s in candidates if not _is_protic(s)]
+        if aprotic and _is_protic(s_raw):
+            candidates = aprotic
+            gate_applied = True
+    s_gated = min(candidates, key=Score.get)
+
+    # STEP 5: dielectric tie-breaker (within noise band, lowest ε wins)
+    min_score = Score[s_gated]
+    band = [s for s in candidates if Score[s] - min_score <= POROGEN_TIE_TAU]
+    s_star = min(band, key=lambda s: solvents.get(s, float("inf")))
+
+    # STEP 6: solubility sanity flag
+    eps_star = solvents.get(s_star)
+    warning = None
+    template_polar = (t_mol is not None and
+                      (Lipinski.NumHDonors(t_mol) + Lipinski.NumHAcceptors(t_mol)) >= 2)
+    if eps_star is not None and eps_star < POROGEN_LOW_EPS_WARN and template_polar:
+        higher = sorted((s for s in candidates
+                         if solvents.get(s, 0) >= POROGEN_LOW_EPS_WARN),
+                        key=Score.get)
+        alt = higher[0] if higher else None
+        warning = (f"porogen '{s_star}' (ε={eps_star}) is very low-polarity but the "
+                   f"template looks polar/ionizable — verify solubility"
+                   + (f"; practical fallback: '{alt}' (ε={solvents.get(alt)})" if alt else ""))
+
+    # STEP 7: k=1 cross-check
+    s_k1 = min(Score1, key=Score1.get) if Score1 else s_star
+
+    info = {
+        "porogen": s_star,
+        "epsilon": eps_star,
+        "regime": "hbond" if hbond_driven else "dispersion",
+        "protic_gate_applied": gate_applied,
+        "T_k": T_k,
+        "m1_single_best_complex": m1,
+        "score_table_topk_mean": {s: round(Score[s], 3) for s in Score},
+        "score_table_k1": {s: round(Score1[s], 3) for s in Score1},
+        "tie_band": band,
+        "tie_tau_kcal": POROGEN_TIE_TAU,
+        "k1_solvent": s_k1,
+        "k1_agrees_with_topk": s_k1 == s_star,
+        "solubility_warning": warning,
+        "k": k,
+        "method": ("top-k mean in-solvent BSSE binding, argmin + protic H-bond gate "
+                   "+ low-ε tie-breaker (van Wissen 2025; Suryana 2021; Liu 2021; "
+                   "Del Sole 2009)"),
+    }
+    return s_star, info
+
+
+def aggregate_solvent_energy(solvent_data: dict, strategy: str = None,
+                             forced_solvent: str = None) -> tuple:
     """Select a single bsse_dE value from multi-solvent DFT results.
 
     Args:
         solvent_data: {solvent_name: {"bsse_dE": float, ...}}
-        strategy: "synthesis_match", "minimum", "average", "worst"
+        strategy: "global_optimal", "synthesis_match", "minimum", "average", "worst"
+        forced_solvent: for "global_optimal"/"synthesis_match", use this solvent
+            (the globally-selected porogen) instead of SYNTHESIS_SOLVENT.
 
     Returns:
         (selected_bsse_dE, selected_solvent_name)
@@ -57,13 +221,14 @@ def aggregate_solvent_energy(solvent_data: dict, strategy: str = None) -> tuple:
     if not energies:
         return 0.0, "N/A"
 
-    if strategy == "synthesis_match":
-        solvent = SYNTHESIS_SOLVENT
-        if solvent in energies:
+    if strategy in ("synthesis_match", "global_optimal"):
+        solvent = forced_solvent or (SYNTHESIS_SOLVENT
+                                     if strategy == "synthesis_match" else None)
+        if solvent and solvent in energies:
             return energies[solvent], solvent
         # Fallback to first available solvent
         first = next(iter(energies))
-        logger.warning(f"Synthesis solvent '{solvent}' not found, using '{first}'")
+        logger.warning(f"Porogen '{solvent}' not found, using '{first}'")
         return energies[first], first
 
     elif strategy == "minimum":
@@ -175,7 +340,8 @@ def compute_interferent_binding(template_smiles: str,
 def compute_selectivity(template_dft: dict, interferent_dft: dict,
                         interferent_library: dict,
                         solvents: dict,
-                        template_smiles: str = None) -> pd.DataFrame:
+                        template_smiles: str = None,
+                        forced_solvent: str = None) -> pd.DataFrame:
     """Compute selectivity scores with cavity shape correction.
 
     Mukasa 2023 convention: E = |binding energy| (positive, larger = stronger)
@@ -191,8 +357,11 @@ def compute_selectivity(template_dft: dict, interferent_dft: dict,
     kbt = KB_KCAL * TEMPERATURE  # kcal/mol
     template_smiles = template_smiles or TEMPLATE_SMILES
 
+    _shown_solvent = (forced_solvent if SOLVENT_STRATEGY == "global_optimal"
+                      else SYNTHESIS_SOLVENT if SOLVENT_STRATEGY == "synthesis_match"
+                      else None)
     logger.info(f"[Solvent strategy: {SOLVENT_STRATEGY}"
-                f"{' → ' + SYNTHESIS_SOLVENT if SOLVENT_STRATEGY == 'synthesis_match' else ''}]")
+                f"{' → ' + _shown_solvent if _shown_solvent else ''}]")
     logger.info(f"[Cavity correction: {CAVITY_CORRECTION}"
                 f"{f', α={CAVITY_ALPHA}, β={CAVITY_BETA}' if CAVITY_CORRECTION else ''}]")
 
@@ -214,7 +383,8 @@ def compute_selectivity(template_dft: dict, interferent_dft: dict,
     rows = []
     for m_name, solvent_data in template_dft.items():
         # Use solvent strategy to pick the representative energy
-        e_template, selected_solvent = aggregate_solvent_energy(solvent_data)
+        e_template, selected_solvent = aggregate_solvent_energy(
+            solvent_data, forced_solvent=forced_solvent)
 
         # Convert to absolute value (Mukasa convention: positive = stronger)
         E_Tar = abs(e_template)
@@ -227,11 +397,13 @@ def compute_selectivity(template_dft: dict, interferent_dft: dict,
             if not interf_solvent_data:
                 logger.warning(f"Missing interferent data: {interf_name}/{m_name}")
                 continue
-            # For interferent, pick same solvent if synthesis_match, else apply strategy
-            if SOLVENT_STRATEGY == "synthesis_match" and selected_solvent in interf_solvent_data:
+            # For interferent, use the SAME (global/synthesis) solvent as the template
+            if (SOLVENT_STRATEGY in ("synthesis_match", "global_optimal")
+                    and selected_solvent in interf_solvent_data):
                 e_interf = interf_solvent_data[selected_solvent]
             elif isinstance(next(iter(interf_solvent_data.values())), dict):
-                e_interf, _ = aggregate_solvent_energy(interf_solvent_data)
+                e_interf, _ = aggregate_solvent_energy(
+                    interf_solvent_data, forced_solvent=forced_solvent)
             else:
                 e_interf = interf_solvent_data.get(selected_solvent,
                            next(iter(interf_solvent_data.values())))
@@ -335,37 +507,86 @@ def run_stage3(template_smiles: str = None,
     logger.info(f"Stage 3: Selectivity for {len(monomer_names)} monomers, "
                 f"{len(interferent_library)} interferents")
 
-    # Compute interferent binding energies (with skip logic for completed pairs)
-    # Always call compute_interferent_binding — it loads cache internally
-    # and only computes missing pairs
-    interferent_dft = compute_interferent_binding(
-        template_smiles, monomer_names, monomer_library,
-        interferent_library, solvents, output_dir
-        )
+    # ── Global porogen selection: ONE optimal solvent, fixed system-wide ──
+    global_porogen = None
+    if SOLVENT_STRATEGY == "global_optimal":
+        global_porogen, porogen_info = select_global_porogen(
+            template_dft, solvents, template_smiles)
+        logger.info(f"[Global porogen] {global_porogen} "
+                    f"(ε={porogen_info.get('epsilon')}, regime={porogen_info.get('regime')})"
+                    f" — top-{porogen_info.get('k')} monomers {porogen_info.get('T_k')}")
+        logger.info(f"  Score (top-k mean ΔE, kcal/mol): {porogen_info.get('score_table_topk_mean')}")
+        if porogen_info.get("protic_gate_applied"):
+            logger.info("  protic solvent rejected (H-bond MIP gate)")
+        if not porogen_info.get("k1_agrees_with_topk"):
+            logger.info(f"  note: single-best-complex prefers "
+                        f"{porogen_info.get('k1_solvent')}")
+        if porogen_info.get("solubility_warning"):
+            logger.warning(f"  {porogen_info['solubility_warning']}")
+        with open(out_path / "global_porogen.json", "w") as f:
+            json.dump(porogen_info, f, indent=2, default=str)
 
-    # Compute selectivity
-    df = compute_selectivity(template_dft, interferent_dft,
-                             interferent_library, solvents,
-                             template_smiles=template_smiles)
+    if interferent_library:
+        # Compute interferent binding energies (with skip logic for completed pairs)
+        # Always call compute_interferent_binding — it loads cache internally
+        # and only computes missing pairs
+        interferent_dft = compute_interferent_binding(
+            template_smiles, monomer_names, monomer_library,
+            interferent_library, solvents, output_dir
+            )
 
-    # Save CSV (sorted by avg_log_S descending — most selective first)
-    df = df.sort_values("avg_log_S", ascending=False).reset_index(drop=True)
-    csv_path = out_path / "stage3_selectivity.csv"
-    df.to_csv(csv_path, index=False)
-    logger.info(f"Results saved: {csv_path}")
+        # Compute selectivity
+        df = compute_selectivity(template_dft, interferent_dft,
+                                 interferent_library, solvents,
+                                 template_smiles=template_smiles,
+                                 forced_solvent=global_porogen)
 
-    # Plot
-    plot_results(df, output_dir)
+        # Save CSV (sorted by avg_log_S descending — most selective first)
+        df = df.sort_values("avg_log_S", ascending=False).reset_index(drop=True)
+        csv_path = out_path / "stage3_selectivity.csv"
+        df.to_csv(csv_path, index=False)
+        logger.info(f"Results saved: {csv_path}")
 
-    # Rank monomers by average selectivity (no filtering — all pass to Stage 4)
-    ranking = (df.groupby("monomer")["avg_log_S"]
-               .mean()
-               .sort_values(ascending=False))
-    top_names = ranking.index.tolist()  # All monomers, ranked
+        # Plot
+        plot_results(df, output_dir)
 
-    logger.info("Selectivity ranking (all passed to Stage 4):")
-    for i, (name, score) in enumerate(ranking.items(), 1):
-        logger.info(f"  {i}. {name:>10s}: avg_log(S) = {score:+.3f}")
+        # Rank monomers by average selectivity (no filtering — all pass to Stage 4)
+        ranking = (df.groupby("monomer")["avg_log_S"]
+                   .mean()
+                   .sort_values(ascending=False))
+        top_names = ranking.index.tolist()  # All monomers, ranked
+
+        logger.info("Selectivity ranking (all passed to Stage 4):")
+        for i, (name, score) in enumerate(ranking.items(), 1):
+            logger.info(f"  {i}. {name:>10s}: avg_log(S) = {score:+.3f}")
+    else:
+        # No-interferent mode: skip selectivity, rank by DFT binding energy.
+        be = {}
+        if global_porogen:
+            logger.info(f"No interferents — ranking by binding energy in the global "
+                        f"porogen '{global_porogen}'.")
+            for m, solvs in template_dft.items():
+                v = solvs.get(global_porogen)
+                if isinstance(v, dict) and v.get("bsse_dE") is not None:
+                    be[m] = float(v["bsse_dE"])
+                else:  # monomer missing the porogen → fall back to its mean
+                    vals = [x["bsse_dE"] for x in solvs.values()
+                            if isinstance(x, dict) and "bsse_dE" in x]
+                    if vals:
+                        be[m] = sum(vals) / len(vals)
+        else:
+            logger.info("No interferents configured — skipping selectivity; "
+                        "ranking monomers by |DFT binding energy| (mean over solvents).")
+            for m, solvs in template_dft.items():
+                vals = [v["bsse_dE"] for v in solvs.values()
+                        if isinstance(v, dict) and "bsse_dE" in v]
+                if vals:
+                    be[m] = sum(vals) / len(vals)
+        # Most negative (strongest) binding first
+        top_names = sorted(be, key=lambda m: be.get(m, 0.0))
+        logger.info("Binding-energy ranking (all passed to Stage 4):")
+        for i, name in enumerate(top_names, 1):
+            logger.info(f"  {i}. {name:>10s}: BE = {be.get(name, float('nan')):+.3f} kcal/mol")
 
     # Save all ranked monomers (Stage 4 receives all)
     with open(out_path / "stage3_top.json", "w") as f:
@@ -403,7 +624,8 @@ def run_stage3(template_smiles: str = None,
     return top_names
 
 
-# Note: Multi-monomer combination optimization moved to stage4_md.py
+# Note: multi-monomer combination search is Stage 4 (stage4_mmsd.py); the
+# MD-metric fallback (_optimize_combination) lives in stage5_md.py
 # where Stage 4 MD metrics (contact freq, EBN) are available.
 
 
