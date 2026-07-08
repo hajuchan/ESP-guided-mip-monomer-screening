@@ -38,6 +38,20 @@ MONOMER_LIBRARY = {
     "VIM":     "C=Cn1ccnc1",             # 1-Vinylimidazole (basic)
     "NIPAM":   "C=CC(=O)NC(C)C",         # N-Isopropylacrylamide (neutral)
     "4VBA":    "C=Cc1ccc(C(=O)O)cc1",    # 4-Vinylbenzoic acid (hydrophobic π-π / acidic)
+    # ── Hydrophobic / π-rich vinyls (nonpolar templates, e.g. terpene) ──
+    "BMA":     "CCCCOC(=O)C(=C)C",         # n-Butyl methacrylate (hydrophobic)
+    "LMA":     "CCCCCCCCCCCCOC(=O)C(=C)C", # Lauryl methacrylate (strong hydrophobic)
+    "tBAm":    "CC(C)(C)NC(=O)C=C",        # N-tert-Butylacrylamide (hydrophobic + amide)
+    "2VN":     "C=Cc1ccc2ccccc2c1",        # 2-Vinylnaphthalene (aromatic π-stack)
+    "HEMA":    "CC(=C)C(=O)OCCO",          # 2-Hydroxyethyl methacrylate (H-bond OH)
+    "DMAEMA":  "CC(=C)C(=O)OCCN(C)C",      # 2-(Dimethylamino)ethyl methacrylate (cationic anchor)
+    # ── Silane monomers (sol-gel; separate chemistry, auto-detected) ──
+    "APTES":   "NCCCO[Si](OCC)(OCC)OCC",   # 3-Aminopropyltriethoxysilane (amine anchor)
+    "MPTMS":   "SCCCO[Si](OC)(OC)OC",      # 3-Mercaptopropyltrimethoxysilane (thiol)
+    "PTES":    "CCO[Si](OCC)(OCC)c1ccccc1",# Phenyltriethoxysilane (π-stack)
+    "IBTES":   "CC(C)CO[Si](OCC)(OCC)OCC", # Isobutyltriethoxysilane (hydrophobic)
+    "UPTMS":   "O=C(N)NCCCO[Si](OC)(OC)OC",# 3-Ureidopropyltrimethoxysilane (multi H-bond)
+    "CETES":   "N#CCCCO[Si](OCC)(OCC)OCC", # 3-Cyanopropyltriethoxysilane (H-bond acceptor)
 }
 
 # ── Interferent Library ──────────────────────────────────────────────
@@ -60,9 +74,14 @@ SOLVENTS = {
 }
 
 # ── Pipeline Parameters ─────────────────────────────────────────────
-STAGE1_TOP_N = 7       # Number of monomers passed from xTB screening
-STAGE3_TOP_N = 3       # Number of monomers sent to MD verification
-N_WORKERS    = 11      # CPU parallel processes
+# Stage 1 funnel cap: keep only the top-N strongest xTB binders for Stage 2 DFT.
+# None = pass ALL binders (dE<0) — appropriate for a small curated library.
+# Set to an int (e.g. 20) to save DFT/MMSD cost on a large library.
+STAGE1_TOP_N = None
+# Stage 3 global-porogen scoring uses the top-k monomers by binding (T_k). Not a
+# hard funnel — all monomers still pass to Stage 4 (MMSD searches over them).
+STAGE3_TOP_N = 3
+N_WORKERS    = 8       # CPU parallel processes
 N_GPU_WORKERS = 1      # GPU parallel processes (limited by VRAM)
 USE_GPU      = True    # Use GPU acceleration when available
 from pathlib import Path as _Path
@@ -170,7 +189,23 @@ MD_RATIO_SCREENING = True      # True면 비율별 스크리닝
 MD_RATIOS_TO_TEST = [1, 2, 4]   # 테스트할 비율 목록
 MD_TEMPLATE_MONOMER_RATIO = 4   # 고정 비율 (MD_RATIO_SCREENING=False 시)
 
-# ── Stage 4: MD Parameters ──
+# ── Stage 4: MMSD combination search ──
+MMSD_ENABLE = True
+MMSD_OPTIMIZER = "nsga2"       # "nsga2" | "bayesian" | "greedy" (자동 fallback)
+# Funnel: Stage 2 DFT ranking → 중합 호환 monomer만 → 상위 N을 MMSD로.
+MMSD_CANDIDATE_POOL = 10       # DFT 랭킹 상위 N (None이면 전체)
+MMSD_POLYMERIZATION = None     # None = 모든 중합 방식(vinyl/silane/oxidative) 경쟁,
+#                                MMSD가 조합을 단일 화학으로만 구성 → 이긴 화학 채택.
+#                                특정 방식으로 강제하려면 "vinyl" 등 지정.
+#                                (중합 타입은 SMILES에서 자동 판별)
+MMSD_BE_THRESHOLD = None       # 최소 결합 강도(kcal/mol). None=제한 없음.
+#                                (예: -2.0이면 그보다 약한 monomer 제외 — 약결합 template엔 주의)
+MMSD_MIN_COMBO_SIZE = 2        # 조합 최소 functional monomer 수
+MMSD_MAX_COMBO_SIZE = 4        # 조합 최대 functional monomer 수
+MMSD_TOP_PC = 3                # MMSD가 산출하는 상위 조합(PC) 수
+MMSD_MD_TOP_N = 3              # Stage 5에서 MD로 검증할 상위 조합 수
+
+# ── Stage 5: MD Parameters ──
 MD_TIME_NS = 50              # Production MD time (ns)
 MD_CONTACT_CUTOFF = 6.0      # Å, contact frequency cutoff
 MD_BOX_SIZE = 4.0            # nm, initial box size
@@ -181,7 +216,7 @@ MD_CROSSLINKER_RATIO = 20       # cross-linker:template molar ratio
 MD_MULTI_MONOMER = True         # True: include all top monomers in one simulation
 MD_MULTI_MONOMER_TOP_N = 3       # Number of top monomers to include in multi-monomer MD
 
-# ── Stage 5: VIP Parameters ──
+# ── Stage 6: VIP Parameters ──
 VIP_N_SNAPSHOTS = 5              # Equilibrium snapshots (evenly spaced)
 VIP_RESTRAINT_K = 1000           # kJ/mol/nm² position restraint
 VIP_REMOVAL_NS = 10             # Template removal test (ns)
@@ -194,10 +229,14 @@ USE_ESP_MAP = True  # True면 Stage 2에서 ESP 맵 생성
 
 # Feature 5: Cross-linker 스크리닝
 CROSSLINKER_LIBRARY = {
+    # vinyl (free-radical) crosslinkers
     "EGDMA": "C=C(C)C(=O)OCCOC(=O)C(=C)C",
     "DVB":   "C=Cc1ccccc1C=C",
     "TRIM":  "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
     "BAM":   "C=CC(=O)NCCNC(=O)C=C",
+    # silane (sol-gel) crosslinkers — used only for silane monomer combos
+    "TEOS":  "CCO[Si](OCC)(OCC)OCC",       # Tetraethyl orthosilicate
+    "TMOS":  "CO[Si](OC)(OC)OC",           # Tetramethyl orthosilicate
 }
 CROSSLINKER_SCREENING = True  # True면 cross-linker 후보 스크리닝
 CROSSLINKER_THRESHOLD = -1.0  # kcal/mol — 이보다 강하면 부적합 경고

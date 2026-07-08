@@ -174,15 +174,14 @@ def run_stage5(template_smiles: str = None,
     _recommend_ratios(all_results)
     _print_summary(all_results)
 
-    # ── Multi-monomer combination optimization + MD ──
-    from .config import (MD_MULTI_MONOMER, MD_MULTI_MONOMER_TOP_N,
-                         MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO)
+    # ── Multi-monomer MD: validate the top-N MMSD combinations ──
+    from .config import (MD_MULTI_MONOMER, MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO)
+    from . import config as _cfg
+    md_top_n = getattr(_cfg, "MMSD_MD_TOP_N", 3)
     if MD_MULTI_MONOMER and len(all_results) >= 2:
-        logger.info("\n--- Multi-monomer combination optimization ---")
+        logger.info(f"\n--- Multi-monomer MD (top-{md_top_n} MMSD combinations) ---")
         try:
-            from . import config as _cfg
-            combo = None
-            # Prefer the combination already chosen by Stage 4 (MMSD)
+            # Load Stage 4 MMSD combinations (or run MMSD here as a fallback).
             mmsd_json = out_path.parent / "stage4" / "mmsd_results.json"
             mres = None
             if mmsd_json.exists():
@@ -190,7 +189,6 @@ def run_stage5(template_smiles: str = None,
                     mres = json.loads(mmsd_json.read_text())
                 except Exception:
                     mres = None
-            # If Stage 4 (MMSD) was not run, fall back to running it here
             if mres is None and getattr(_cfg, "MMSD_ENABLE", True):
                 try:
                     from .stage4_mmsd import run_mmsd
@@ -199,64 +197,82 @@ def run_stage5(template_smiles: str = None,
                 except Exception as e:
                     logger.warning(f"  MMSD search failed ({e}); "
                                    f"using greedy metric selection")
-            top = (mres or {}).get("top_pcs") or []
-            if top:
-                pc = top[0]
-                combo = {
-                    "selected": [m for m in pc.get("functional_monomers", [])
-                                 if m in monomer_library],
-                    "score": pc.get("bo_objective") or 0.0,
-                    "method": f"MMSD ({(mres or {}).get('optimizer')})",
-                    "crosslinker": pc.get("crosslinker"),
-                    "mmsd": pc,
-                }
-            if not (combo and combo.get("selected")):
-                combo = _optimize_combination(all_results, monomer_library, out_path)
-            if combo and combo.get("selected"):
+
+            # Build the list of combinations to validate (top-N PCs from MMSD).
+            top_pcs = (mres or {}).get("top_pcs") or []
+            combos = []
+            for pc in top_pcs[:md_top_n]:
+                sel = [m for m in pc.get("functional_monomers", [])
+                       if m in monomer_library]
+                if sel:
+                    combos.append({
+                        "selected": sel,
+                        "score": pc.get("bo_objective") or 0.0,
+                        "method": f"MMSD ({(mres or {}).get('optimizer')})",
+                        "crosslinker": pc.get("crosslinker"),
+                        "mmsd": pc,
+                    })
+            if not combos:  # fallback: single greedy-metric combination
+                fb = _optimize_combination(all_results, monomer_library, out_path)
+                if fb and fb.get("selected"):
+                    combos = [fb]
+
+            from .utils_gromacs import (build_multi_monomer_system,
+                                        run_md_pipeline, analyze_md)
+            for rank, combo in enumerate(combos, 1):
+                combo["rank"] = rank
                 combo_names = combo["selected"]
-                combo_smiles = {n: monomer_library[n] for n in combo_names if n in monomer_library}
+                combo_smiles = {n: monomer_library[n] for n in combo_names
+                                if n in monomer_library}
+                logger.info(f"  [PC{rank}] {combo_names} (score={combo['score']:.3f})")
 
-                logger.info(f"  Optimal combination: {combo_names} (score={combo['score']:.3f})")
-                with open(out_path / "stage5_combination.json", "w") as f:
-                    json.dump(combo, f, indent=2, default=str)
+                mm_dir = out_path / f"multi_monomer_pc{rank}"
+                mm_dir.mkdir(parents=True, exist_ok=True)
 
-                # Run multi-monomer MD
-                from .utils_gromacs import build_multi_monomer_system, run_md_pipeline, analyze_md
-                mm_dir = out_path / "multi_monomer"
-                mm_dir.mkdir(exist_ok=True)
-
-                # Prefer the crosslinker chosen by MMSD, else first in library
-                _mmsd_xl = combo.get("crosslinker")
+                # Prefer the crosslinker chosen by MMSD, else first in library.
+                _xl = combo.get("crosslinker")
                 if MD_INCLUDE_CROSSLINKER:
-                    xl_name = (_mmsd_xl if _mmsd_xl in CROSSLINKER_LIBRARY
+                    xl_name = (_xl if _xl in CROSSLINKER_LIBRARY
                                else list(CROSSLINKER_LIBRARY.keys())[0])
                     xl_smiles = CROSSLINKER_LIBRARY[xl_name]
                 else:
                     xl_name = xl_smiles = None
 
-                sys_info = build_multi_monomer_system(
-                    template_smiles, "TMP", combo_smiles,
-                    n_per_monomer=2, work_dir=mm_dir / "build",
-                    box_size=MD_BOX_SIZE + 1.0,  # larger box for more molecules
-                    crosslinker_smiles=xl_smiles,
-                    crosslinker_name=xl_name,
-                    n_crosslinker=MD_CROSSLINKER_RATIO if MD_INCLUDE_CROSSLINKER else 0,
-                )
-                if "error" not in sys_info:
+                try:
+                    sys_info = build_multi_monomer_system(
+                        template_smiles, "TMP", combo_smiles,
+                        n_per_monomer=2, work_dir=mm_dir / "build",
+                        box_size=MD_BOX_SIZE + 1.0,
+                        crosslinker_smiles=xl_smiles, crosslinker_name=xl_name,
+                        n_crosslinker=MD_CROSSLINKER_RATIO if MD_INCLUDE_CROSSLINKER else 0,
+                    )
+                    if "error" in sys_info:
+                        combo["md_error"] = sys_info["error"]
+                        logger.warning(f"  [PC{rank}] build failed: {sys_info['error']}")
+                        continue
                     import shutil as _shutil
                     for f in (mm_dir / "build").glob("*"):
                         if f.is_file():
                             _shutil.copy2(str(f), str(mm_dir / f.name))
                     run_md_pipeline(mm_dir, time_ns=MD_TIME_NS, temperature=TEMPERATURE)
-                    mm_analysis = analyze_md(mm_dir, template_name="TMP",
-                                             cutoff_A=MD_CONTACT_CUTOFF)
-                    combo["md_analysis"] = mm_analysis
-                    with open(out_path / "stage5_combination.json", "w") as f:
-                        json.dump(combo, f, indent=2, default=str)
-                    logger.info(f"  Multi-monomer MD complete: "
-                                f"contact={mm_analysis.get('contact_frequency', 0):.4f}")
+                    combo["md_analysis"] = analyze_md(mm_dir, template_name="TMP",
+                                                      cutoff_A=MD_CONTACT_CUTOFF)
+                    logger.info(f"  [PC{rank}] MD complete: contact="
+                                f"{combo['md_analysis'].get('contact_frequency', 0):.4f}")
+                except Exception as e:
+                    combo["md_error"] = str(e)
+                    logger.warning(f"  [PC{rank}] MD failed: {e}")
+
+            # Rank the validated combinations by MD contact frequency (desc).
+            combos.sort(
+                key=lambda c: c.get("md_analysis", {}).get("contact_frequency", -1.0),
+                reverse=True)
+            with open(out_path / "stage5_combination.json", "w") as f:
+                json.dump(combos, f, indent=2, default=str)
+            logger.info(f"  Saved {len(combos)} MD-validated combination(s) "
+                        f"→ stage5_combination.json")
         except Exception as e:
-            logger.warning(f"  Multi-monomer optimization failed: {e}")
+            logger.warning(f"  Multi-monomer MD failed: {e}")
             import traceback; traceback.print_exc()
 
     return all_results

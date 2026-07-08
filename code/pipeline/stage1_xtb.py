@@ -27,6 +27,7 @@ from .config import (
     TEMPLATE_SMILES,
     MONOMER_LIBRARY,
     N_WORKERS,
+    STAGE1_TOP_N,
     HARTREE_TO_KCAL,
     OUTPUT_DIRS,
     COMPLEX_SEARCH_MODE,
@@ -1028,7 +1029,14 @@ def run_stage1(template_smiles: str = None,
     if unbound:
         logger.info(f"  Filtered out {len(unbound)} non-binding monomers (dE >= 0): "
                     f"{[r['name'] for r in unbound]}")
-    top_results = bound
+    # Sort binders by xTB binding energy (most negative first)
+    top_results = sorted(bound, key=lambda r: r["dE_kcal"])
+    # Optional funnel cap: keep only the STAGE1_TOP_N strongest binders for Stage 2.
+    # STAGE1_TOP_N=None (default) → pass ALL binders (no numeric funnel).
+    if STAGE1_TOP_N and len(top_results) > STAGE1_TOP_N:
+        logger.info(f"  Funnel cap: keeping top {STAGE1_TOP_N} of {len(top_results)} "
+                    f"binders for Stage 2 (STAGE1_TOP_N)")
+        top_results = top_results[:STAGE1_TOP_N]
 
     with open(all_json, "w") as f:
         json.dump(results, f, indent=2)

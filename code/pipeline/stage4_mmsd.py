@@ -71,33 +71,66 @@ MMSD_MAX_PER_CLASS_COUNT            = _c("MMSD_MAX_PER_CLASS_COUNT", 2)
 MMSD_CHEMISTRY_ENTROPY_WEIGHT       = _c("MMSD_CHEMISTRY_ENTROPY_WEIGHT", 0.3)
 
 
-# ── Monomer chemistry metadata (class + polymerization) ────────────────
-# Overridable via config.MONOMER_META. All library monomers polymerise by
-# free-radical vinyl chemistry, so polymerization compatibility is trivially
-# satisfied here; the meaningful diversity axis is the functional class.
-_DEFAULT_MONOMER_META = {
-    "MAA":     {"class": "acidic",      "polymerization": "vinyl"},
-    "AA":      {"class": "acidic",      "polymerization": "vinyl"},
-    "ITA":     {"class": "acidic",      "polymerization": "vinyl"},
-    "4VBA":    {"class": "acidic",      "polymerization": "vinyl"},
-    "4VP":     {"class": "basic",       "polymerization": "vinyl"},
-    "2VP":     {"class": "basic",       "polymerization": "vinyl"},
-    "VIM":     {"class": "basic",       "polymerization": "vinyl"},
-    "OPD":     {"class": "basic",       "polymerization": "vinyl"},
-    "APB":     {"class": "boronic",     "polymerization": "vinyl"},
-    "4VB":     {"class": "boronic",     "polymerization": "vinyl"},
-    "MAAD":    {"class": "neutral",     "polymerization": "vinyl"},
-    "ACM":     {"class": "neutral",     "polymerization": "vinyl"},
-    "NIPAM":   {"class": "neutral",     "polymerization": "vinyl"},
-    "NVP":     {"class": "neutral",     "polymerization": "vinyl"},
-    "PYR":     {"class": "neutral",     "polymerization": "vinyl"},
-    "Styrene": {"class": "hydrophobic", "polymerization": "vinyl"},
+# ── Monomer chemistry metadata (recognition class + polymerization) ────
+# Recognition class = primary interaction mode (Mavliutova 2021; Cleland 2022),
+# NOT crude acid/base. Overridable via config.MONOMER_CLASS.
+_DEFAULT_MONOMER_CLASS = {
+    # electrostatic / ionic (COOH — pairs with amine/backbone)
+    "MAA": "electrostatic", "AA": "electrostatic",
+    "ITA": "electrostatic", "4VBA": "electrostatic",
+    # H-bond donor (amide/amine NH, OH)
+    "MAAD": "hbond_donor", "ACM": "hbond_donor", "NIPAM": "hbond_donor",
+    "OPD": "hbond_donor", "PYR": "hbond_donor",
+    # H-bond acceptor / basic N-heterocycle (pyridine, imidazole, lactam)
+    "4VP": "hbond_accept", "2VP": "hbond_accept",
+    "VIM": "hbond_accept", "NVP": "hbond_accept",
+    # aromatic π-stack
+    "Styrene": "pi_stack", "2VN": "pi_stack",
+    # boronate-diol
+    "4VB": "boronate", "APB": "boronate",
+    # hydrophobic alkyl (dispersion / shape — nonpolar templates)
+    "BMA": "hydrophobic", "LMA": "hydrophobic", "EHMA": "hydrophobic",
+    "tBAm": "hydrophobic",
+    # extras
+    "HEMA": "hbond_donor",
+    "DMAEMA": "electrostatic", "APMA": "electrostatic", "AMPS": "electrostatic",
+    # silane (sol-gel) functional monomers
+    "APTES": "hbond_donor", "UPTMS": "hbond_donor", "MPTMS": "covalent",
+    "PTES": "pi_stack", "IBTES": "hydrophobic", "CETES": "hbond_accept",
 }
-MONOMER_META = {**_DEFAULT_MONOMER_META, **_c("MONOMER_META", {})}
+MONOMER_CLASS = {**_DEFAULT_MONOMER_CLASS, **_c("MONOMER_CLASS", {})}
+
+
+def _detect_polymerization(smiles):
+    """Auto-classify the polymerization mechanism from structure. Different
+    mechanisms CANNOT be mixed in one pot (Liu 2017), but each is a valid MIP
+    route on its own — so we detect the type rather than force everything vinyl.
+      • silane      : Si-alkoxide (sol-gel condensation)
+      • vinyl       : non-aromatic C=C (free-radical chain)
+      • oxidative   : electron-rich aromatic (pyrrole/aniline/catechol) — oxidative/
+                      electro-polymerisation
+    Robust to library edits — no hand-maintained table to get wrong."""
+    if not smiles:
+        return "unknown"
+    from rdkit import Chem
+    m = Chem.MolFromSmiles(smiles)
+    if m is None:
+        return "unknown"
+    if m.HasSubstructMatch(Chem.MolFromSmarts("[Si]")):
+        return "silane"
+    if m.HasSubstructMatch(Chem.MolFromSmarts("[C;!a]=[C;!a]")):
+        return "vinyl"
+    return "oxidative"
+
+
+# Precompute polymerization type once (RDKit call per unique molecule).
+_POLY = {n: _detect_polymerization(s)
+         for n, s in {**MONOMER_LIBRARY, **CROSSLINKER_LIBRARY}.items()}
 
 
 def _meta(name):
-    return MONOMER_META.get(name, {"class": "unknown", "polymerization": "vinyl"})
+    return {"class": MONOMER_CLASS.get(name, "unknown"),
+            "polymerization": _POLY.get(name, "unknown")}
 
 
 # ── Compatibility & diversity (ported from Bio utils_analysis) ─────────
@@ -137,12 +170,13 @@ def check_chemistry_diversity(monomers):
 
 
 def _get_compatible_crosslinkers(monomers):
-    """Crosslinkers whose polymerization matches the functional set.
-    All library monomers/crosslinkers are vinyl here, so returns all XLs."""
+    """Crosslinkers whose polymerization chemistry matches the functional set
+    (vinyl combos → EGDMA/DVB…, silane combos → TEOS/TMOS). Oxidative combos
+    typically have no molecular crosslinker → returns []."""
     ok, ptype, _ = is_polymerization_compatible(monomers)
     if not ok:
         return []
-    return list(CROSSLINKER_LIBRARY.keys())
+    return [k for k in CROSSLINKER_LIBRARY if _meta(k)["polymerization"] == ptype]
 
 
 def _synthesizability_score(monomers):
@@ -266,7 +300,9 @@ def _run_single_mmsd(pc_id, functional_monomers, template_mol,
             xl_comparison[xl] = round(be, 3) if be is not None else None
             if be is not None and (best_xl is None or be < best_xl_be):
                 best_xl, best_xl_be = xl, be
-        if best_xl is None:
+        # Only exclude if crosslinkers EXISTED for this chemistry but all failed.
+        # No compatible crosslinker (e.g. oxidative polymers) → proceed without one.
+        if compatible and best_xl is None:
             logger.warning(f"  {pc_id}: all crosslinkers failed — excluded")
             return _excluded(pc_id, functional_monomers, monomer_energies,
                              xl_comparison)
@@ -604,17 +640,41 @@ def run_mmsd(template_smiles=None, output_dir=None, optimizer=None, force=False)
                      "(run Stage 1/2 first)")
         return {"error": "no SMD baseline"}
 
-    # candidate pool: prefer Stage 3 porogen-fixed ranking, else strongest SMD binders
-    ranked3 = _load_stage3_ranking(out)
-    if ranked3:
-        pool = [m for m in ranked3
-                if m in MONOMER_LIBRARY and m in smd_be][:MMSD_CANDIDATE_POOL]
-        pool_src = "Stage 3 ranking"
-    else:
-        pool = [m for m in sorted(smd_be, key=lambda m: smd_be[m])
-                if m in MONOMER_LIBRARY][:MMSD_CANDIDATE_POOL]
-        pool_src = "SMD binding"
-    logger.info(f"MMSD candidate pool ({len(pool)}, from {pool_src}): {pool}")
+    # ── Candidate pool (funnel) ──
+    # Order by DFT ranking (Stage 3), keep only monomers whose polymerization
+    # chemistry matches the target synthesis (free-radical → vinyl), optionally
+    # drop weak binders, then take the top-N. This gives Stage 2 DFT a real
+    # "who advances to MMSD" role and enforces one-pot synthesis compatibility.
+    target_poly = getattr(cfg, "MMSD_POLYMERIZATION", "vinyl")
+    be_thresh = getattr(cfg, "MMSD_BE_THRESHOLD", None)
+
+    def _eligible(m):
+        if m not in MONOMER_LIBRARY:
+            return False
+        if target_poly and _meta(m)["polymerization"] != target_poly:
+            return False  # incompatible polymerization (e.g. oxidative PYR/OPD/APB)
+        if be_thresh is not None and smd_be.get(m, 0.0) > be_thresh:
+            return False  # too weak (smd_be negative = stronger)
+        return True
+
+    ranked3 = _load_stage3_ranking(out)                       # DFT-ranked
+    ranked = ranked3 or sorted(smd_be, key=lambda m: smd_be.get(m, 0.0))
+    pool_src = "Stage 3 DFT ranking" if ranked3 else "SMD binding"
+
+    eligible = [m for m in ranked if _eligible(m)]
+    excluded = [m for m in ranked
+                if m in MONOMER_LIBRARY and not _eligible(m)]
+    pool = eligible[:MMSD_CANDIDATE_POOL] if MMSD_CANDIDATE_POOL else eligible
+
+    cap = MMSD_CANDIDATE_POOL or "all"
+    poly_note = f"{target_poly}-only" if target_poly else "all-chemistry (compete)"
+    logger.info(f"MMSD pool ({len(pool)}, from {pool_src}, top-{cap}, {poly_note}): {pool}")
+    if excluded:
+        why = f"non-{target_poly}" if target_poly else "weak binding"
+        logger.info(f"  excluded ({why}): {excluded}")
+    if not pool:
+        logger.error("MMSD: empty pool after polymerization/BE filter")
+        return {"error": "empty candidate pool"}
 
     template_mol = smiles_to_mol3d(template_smiles)
 
@@ -648,6 +708,15 @@ def run_mmsd(template_smiles=None, output_dir=None, optimizer=None, force=False)
         top_pcs = pareto[:MMSD_TOP_PC]
     else:
         top_pcs = valid[:MMSD_TOP_PC]
+
+    # Annotate each PC with the polymerization method it requires (one chemistry
+    # per MIP; combos are already single-chemistry via is_polymerization_compatible).
+    _POLY_PROTOCOL = {"vinyl": "free-radical", "silane": "sol-gel",
+                      "oxidative": "oxidative/electro-polymerization"}
+    for pc in top_pcs:
+        ok, chem, _ = is_polymerization_compatible(pc.get("functional_monomers", []))
+        pc["polymerization"] = chem if ok else "incompatible"
+        pc["synthesis_method"] = _POLY_PROTOCOL.get(chem, chem)
 
     result = {
         "optimizer": used,

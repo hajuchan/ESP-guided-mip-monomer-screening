@@ -148,22 +148,22 @@ E_Int_eff = E_Int × f_cavity + α × max(V_template - V_interferent, 0)
 
 단일 monomer 순위를 넘어 **최적 monomer 조합**을 탐색한다. `Monomer_screening_in_Bio`의 MMSD (Rajpal 2024)를 이 프로젝트의 **template 중심 xTB 도킹**으로 이식한 것으로, 단백질 대신 template 소분자에 monomer를 하나씩 순차로 붙여 xTB 최적화한다.
 
-Stage 3에서 porogen을 고정하고 monomer 랭킹을 확정한 **뒤** 그 안에서 조합을 최적화하므로, 순서상 selectivity(3) → MMSD(4)가 맞다.
+Stage 3에서 porogen을 고정하고 monomer 랭킹을 확정한 **뒤** 그 안에서 조합을 최적화하므로, 순서상 selectivity(3) → MMSD(4)가 맞다. (형제 프로젝트 `Monomer_screening_in_Bio`와 동일 철학: 넓은 pool → MMSD → 최적 조합 → MD)
 
-- **후보 pool**: Stage 3 랭킹(`stage3_top.json`) 상위 N (없으면 SMD 결합 랭킹)
+- **후보 pool (funnel)**: Stage 3 DFT 랭킹 → **중합 호환(free-radical=vinyl) monomer만** + **DFT 상위 `MMSD_CANDIDATE_POOL`(=10)**. C=C 없는 monomer(PYR/OPD/APB 등 산화중합)는 SMILES 자동판별로 제외 → Stage 2 DFT가 "누가 MMSD로 갈지" 결정. (Liu 2017: 다른 중합 타입 불혼합)
 - **탐색 엔진**: NSGA-II(기본, pymoo) / Bayesian(skopt) / greedy forward+swap — 자동 fallback
 - **순차 MMSD**: template에 monomer를 하나씩 붙여 xTB 최적화 → 복합체 결합에너지 누적
 - **Synergy 지표**: `delta = mmsd_sum − smd_sum` (<0 = 협동결합, >0 = 입체 간섭)
 - **목적함수**: `mmsd_per_monomer + 0.3·max(0, delta)` (크기 정규화)
 - **필터**: polymerization 호환성 + chemistry diversity(class ≥2, class당 ≤2) + 최적 crosslinker 순차 선택
-- 결과는 `stage4/mmsd_results.json`에 top polymer composition으로 저장 → Stage 5 MD가 이 조합을 사용
-- 설정: `MMSD_ENABLE`, `MMSD_OPTIMIZER`, `MMSD_CANDIDATE_POOL` 등 (config에서 `getattr`로 읽음)
+- 결과는 `stage4/mmsd_results.json`에 **상위 조합(top PC) `MMSD_TOP_PC`개**로 저장 → Stage 5 MD로 전달
+- 설정: `MMSD_ENABLE`, `MMSD_OPTIMIZER`, `MMSD_CANDIDATE_POOL`, `MMSD_TOP_PC`, `MMSD_MD_TOP_N` (config.py)
 
 ### Stage 5: Pre-polymerization MD (GROMACS)
 
 **파일**: `code/pipeline/stage5_md.py`, `code/pipeline/utils_gromacs.py`
 
-Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한다. Stage 4의 MMSD 조합이 있으면 그 조합으로 multi-monomer MD를 수행한다.
+Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한다. 개별 monomer MD에 더해, Stage 4 MMSD의 **상위 `MMSD_MD_TOP_N`(기본 3)개 조합**을 각각 multi-monomer MD로 검증하고 contact frequency로 재순위한다 (`multi_monomer_pc1..pc3/`, `stage5_combination.json`).
 
 **시스템 구성**:
 - GAFF2 force field (acpype Python API로 parameterization)
@@ -325,11 +325,12 @@ MIP_simulation/
 |------|-----|
 | Template 후보 (`TEMPLATES`) | Gamma-terpinene (`CC1=CCC(=CC1)C(C)C`), Acetic Acid (`CC(=O)O`), Methyl Benzoate (`COC(=O)c1ccccc1`) |
 | 활성 Template | `TEMPLATE_NAME` 로 선택 (기본 Gamma-terpinene) |
-| Monomers (16) | MAA, MAAD, 4VP, OPD, ACM, PYR, 4VB, APB, Styrene, AA, NVP, **ITA, 2VP, VIM, NIPAM, 4VBA** |
+| Monomers (28) | vinyl 19 (MAA·AA·ITA·4VBA·MAAD·ACM·NIPAM·4VP·2VP·VIM·NVP·Styrene·2VN·4VB·BMA·LMA·tBAm·HEMA·DMAEMA), silane 6 (APTES·MPTMS·PTES·IBTES·UPTMS·CETES), oxidative 3 (PYR·OPD·APB) |
+| 중합 방식 | `MMSD_POLYMERIZATION=None` — vinyl/silane/oxidative **경쟁**, 조합은 단일 화학, 이긴 화학 채택 (Stage 7이 화학별 프로토콜 출력) |
 | Interferents | 없음 (이번 스크리닝 비활성 — Stage 3는 결합에너지 랭킹으로 대체) |
 | Solvents (porogen 후보) | Chloroform (ε=4.71), Acetonitrile (ε=35.69), Toluene (ε=2.38) |
 | Porogen 전략 | `global_optimal` — 전역 최적 porogen 1개 자동 선택·고정 |
-| Cross-linker | EGDMA, DVB, TRIM, BAM |
+| Cross-linker | vinyl: EGDMA·DVB·TRIM·BAM / silane: TEOS·TMOS |
 | Workers | 11 (CPU), 1 (GPU) |
 
 ---
