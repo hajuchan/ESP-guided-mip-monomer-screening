@@ -118,7 +118,14 @@ HBOND_DOMINANCE_THRESHOLD = 2
 DFT_OPT_BASIS  = "def2-svp"    # geometry optimization용 (빠름)
 DFT_SP_BASIS   = "def2-tzvp"   # single-point energy용 (정확)
 
-# DFT partial relaxation for large molecules
+# DFT geometry optimization 여부
+# False (기본) — Stage 1 xTB geometry에 DFT SP만 (DFT//xTB, 표준·빠름).
+#   비공유 복합체에서 xTB geometry 오차는 상호작용에너지 ~0.5-1.5 kcal/mol 수준이며
+#   계통적이라 스크리닝 랭킹은 보존됨 (Bannwarth 2019; Grimme CREST/CENSO).
+# True  — 복합체를 DFT로 재최적화 후 SP (정밀하나 pair당 수 분~수십 분).
+DFT_GEOMETRY_OPT = False
+
+# DFT partial relaxation for large molecules (DFT_GEOMETRY_OPT=True 시에만)
 DFT_RELAX_HEAVY_THRESHOLD = 25  # 이 이상의 heavy atom 수에서 DFT relaxation 수행
 DFT_RELAX_STEPS = 5              # partial optimization 스텝 수
 

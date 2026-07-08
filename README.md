@@ -251,8 +251,12 @@ cd MIP_simulation
 
 # 전체 파이프라인 (Stage 1→2→3→4→5→6→7)
 # --output-dir 생략 시 자동으로 results/<TEMPLATE_NAME>/stage1..stage7 에 저장
+# 이미 완료된 stage(출력 파일 존재)는 자동으로 건너뜀 → 중단 후 재실행하면 이어서 진행
 python run_pipeline.py --stage all
 #   → results/Gamma-terpinene/stage1, .../stage2, ...
+
+# 완료된 stage도 강제로 다시 실행
+python run_pipeline.py --stage all --force
 
 # 출력 위치 직접 지정도 가능
 python run_pipeline.py --stage all --output-dir results/g_terpinene

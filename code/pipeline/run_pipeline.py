@@ -42,6 +42,12 @@ def parse_args():
         help="Which stage to run (default: all)"
     )
     parser.add_argument(
+        "--force", action="store_true",
+        help="Recompute Stage 4 MMSD even if mmsd_results.json exists. "
+             "Other stages already resume at the item level (per monomer / "
+             "solvent pair); delete a stage's output to fully redo it."
+    )
+    parser.add_argument(
         "--output-dir", type=str, default=None,
         help=("Output directory. Default: <results>/<TEMPLATE_NAME> "
               "(stage1..stage7 nested inside).")
@@ -94,8 +100,13 @@ def _stage_dir(root_dir: str, stage_key: str) -> str:
 
 
 def run_stage(stage_num: int, template_smiles: str, output_dir: str,
-              prev_results: dict) -> dict:
-    """Run a single pipeline stage and return its results."""
+              prev_results: dict, force: bool = False) -> dict:
+    """Run a single pipeline stage and return its results.
+
+    Stages resume at the item level (each skips already-computed monomers /
+    solvent pairs). ``force=True`` bypasses reuse where a stage supports it
+    (currently Stage 4 MMSD).
+    """
     t0 = time.time()
 
     if stage_num == 1:
@@ -129,6 +140,7 @@ def run_stage(stage_num: int, template_smiles: str, output_dir: str,
         mmsd_result = run_stage4(
             template_smiles=template_smiles,
             output_dir=_stage_dir(output_dir, "stage4"),
+            force=force,
         )
         result = {"mmsd": mmsd_result}
 
@@ -307,7 +319,10 @@ def main():
 
     for stage_num in stages:
         logger.info(f"\n{'='*20} STAGE {stage_num} {'='*20}")
-        result = run_stage(stage_num, template, out_dir, prev_results)
+        # Each stage resumes at the item level (per monomer / solvent pair);
+        # already-computed work is skipped, remaining/new work is done.
+        result = run_stage(stage_num, template, out_dir, prev_results,
+                           force=args.force)
         timings[f"stage{stage_num}"] = result["elapsed_s"]
         prev_results.update(result)
 

@@ -32,6 +32,7 @@ from .config import (
     OUTPUT_DIR,
     OUTPUT_DIRS,
     USE_ESP_MAP,
+    DFT_GEOMETRY_OPT,
     DFT_RELAX_HEAVY_THRESHOLD,
     DFT_RELAX_STEPS,
     DFT_OPT_BASIS,
@@ -330,9 +331,10 @@ def dft_energy(atom_str: str, basis: str, eps: float,
     mf = dft.RKS(mol).density_fit()  # RI-J density fitting
     mf.xc = func
 
-    # Apply D3BJ dispersion correction explicitly
-    # (LibXC may not auto-activate ωB97XD's built-in D2)
-    mf = _apply_d3bj(mf, mol)
+    # NOTE: do NOT add external D3/D3BJ here. ωB97X-D carries its own D2 and
+    # ωB97M-V its own VV10 nonlocal dispersion inside the functional; adding
+    # dftd3 both double-counts and crashes (the installed dftd3 has no damping
+    # entry for 'WB97XD'/'WB97M-V'). Dispersion is already included via mf.xc.
 
     from pyscf.solvent import PCM
     mf = PCM(mf)
@@ -448,9 +450,13 @@ def compute_dft_binding(monomer_name: str, monomer_smiles: str,
             monomer_atom = mol_to_pyscf_atom(monomer_mol)
             complex_atom = mol_to_pyscf_atom(complex_mol)
 
-            logger.info(f"  GPU DFT optimization ({func}+PCM)...")
-            complex_atom = _dft_optimize(complex_atom, basis, eps, tmpdir,
-                                         functional=func)
+            if DFT_GEOMETRY_OPT:
+                logger.info(f"  GPU DFT optimization ({func}+PCM)...")
+                complex_atom = _dft_optimize(complex_atom, basis, eps, tmpdir,
+                                             functional=func)
+            else:
+                # SP-only: DFT single-point on the Stage 1 xTB geometry (DFT//xTB)
+                logger.info(f"  DFT single-point on xTB geometry ({func}+PCM)...")
 
             # Check for covalent bond formation after optimization
             n_template = template_mol.GetNumAtoms()

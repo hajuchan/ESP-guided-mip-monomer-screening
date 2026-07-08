@@ -572,15 +572,31 @@ def _load_stage3_ranking(output_dir):
     return None
 
 
-def run_mmsd(template_smiles=None, output_dir=None, optimizer=None):
+def run_mmsd(template_smiles=None, output_dir=None, optimizer=None, force=False):
     """Run MMSD combination search. Returns a result dict with top polymer
-    compositions (``top_pcs``) and the flat evaluation list."""
+    compositions (``top_pcs``) and the flat evaluation list.
+
+    If a valid ``mmsd_results.json`` already exists and ``force`` is False,
+    it is reused (the search is expensive and has no internal item-level skip).
+    """
     from .stage1_xtb import smiles_to_mol3d
 
     template_smiles = template_smiles or TEMPLATE_SMILES
     out = Path(output_dir) if output_dir else Path(cfg.OUTPUT_DIRS["stage4"])
     out.mkdir(parents=True, exist_ok=True)
     optimizer = optimizer or MMSD_OPTIMIZER
+
+    # Resume: reuse a previous complete result unless forced.
+    result_path = out / "mmsd_results.json"
+    if not force and result_path.exists():
+        try:
+            cached = json.loads(result_path.read_text())
+            if cached.get("top_pcs"):
+                logger.info(f"MMSD: reusing existing {result_path.name} "
+                            f"({len(cached['top_pcs'])} PCs) — use --force to recompute")
+                return cached
+        except Exception as e:
+            logger.warning(f"MMSD: could not read cached results ({e}); recomputing")
 
     smd_be = _load_smd_be(out)
     if not smd_be:
@@ -679,14 +695,14 @@ def _plot(valid, out):
         logger.debug(f"MMSD plot skipped: {e}")
 
 
-def run_stage4(template_smiles=None, output_dir=None, optimizer=None):
+def run_stage4(template_smiles=None, output_dir=None, optimizer=None, force=False):
     """Stage 4 entry point: MMSD multi-monomer combination search.
 
     Thin wrapper over run_mmsd() so the pipeline orchestrator can call it
     like any other stage.
     """
-    return run_mmsd(template_smiles=template_smiles,
-                    output_dir=output_dir, optimizer=optimizer)
+    return run_mmsd(template_smiles=template_smiles, output_dir=output_dir,
+                    optimizer=optimizer, force=force)
 
 
 if __name__ == "__main__":
