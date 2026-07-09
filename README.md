@@ -16,9 +16,10 @@ Stage 1: ESP-guided 분자 표면 도킹 + GFN2-xTB 스크리닝
          └── xTB full optimization → dE < 0 필터 (결합하는 것만 통과)
     ↓ N개 (자동 결정)
 Stage 2: DFT 정밀 결합에너지 (GPU)
-         ├── GPU DFT geometry optimization (def2-SVP + RI-J + geomeTRIC)
+         ├── SP-only (기본): Stage 1 xTB geometry에 DFT SP (DFT//xTB, 빠름)
+         │         └ DFT_GEOMETRY_OPT=True면 GPU DFT 재최적화(def2-SVP+RI-J+geomeTRIC)
          ├── 적응형 범함수: H-bond 지배 → ωB97XD / 분산력 지배 → ωB97M-V
-         ├── SP energy: def2-TZVP + PCM 용매
+         ├── SP energy: def2-TZVP + PCM 용매 (분산 내장, 외부 D3 미사용)
          └── BSSE counterpoise (gas-phase ghost atom)
     ↓ N개 (필터 없음)
 Stage 3: 전역 Porogen 선택 + 선택도 평가 + Cross-linker 추천
@@ -30,18 +31,19 @@ Stage 3: 전역 Porogen 선택 + 선택도 평가 + Cross-linker 추천
          └── Cross-linker DFT 스크리닝 → 최적 cross-linker 추천
     ↓ N개 (필터 없음, 순위 참고)
 Stage 4: MMSD 다중 monomer 조합 탐색
-         ├── 후보 pool = Stage 3 랭킹 상위 N (porogen 고정 후)
+         ├── 후보 pool = Stage 3 DFT 랭킹 상위 N(=10)
+         ├── 중합 방식 경쟁: vinyl/silane/oxidative (조합은 단일 화학, Liu 2017)
          ├── template 중심 순차 xTB 도킹 (greedy / Bayesian / NSGA-II)
          ├── synergy 판정: delta = mmsd_sum − smd_sum (<0 협동)
-         ├── 최적 crosslinker 선택 + chemistry diversity 필터
-         └── top polymer composition → stage4/mmsd_results.json
-    ↓ 조합 (Stage 5 MD로 전달)
+         ├── chemistry diversity 필터 + 화학별 crosslinker (vinyl→EGDMA, silane→TEOS)
+         └── 상위 3개 조합(PC) → stage4/mmsd_results.json
+    ↓ 상위 3개 조합 (Stage 5 MD로)
 Stage 5: Pre-polymerization MD (GROMACS, GPU)
          ├── GAFF2 parameterization (acpype) + 보론 B→C 치환
-         ├── Template + N×monomer (+ MMSD 조합) + TIP3P water
+         ├── Template + N×monomer + TIP3P water (MMSD 상위 3조합 각각 MD 검증)
          ├── EM → NVT → NPT → 50ns Production MD
-         ├── Contact frequency, RDF, EBN, H-bond 분석
-         └── 합성 비율 자동 결정 (contact freq 역비례)
+         ├── Contact frequency, RDF, EBN, H-bond + SASA/FFV(형태학) 분석
+         └── 합성 비율 자동 결정 (EBN 정비례, Yuan 2024)
     ↓ N개 (필터 없음)
 Stage 6: VIP Cavity Rebinding (GROMACS)
          ├── 균등 간격 3개 snapshot 선택 (cherry-picking 방지)
@@ -52,8 +54,9 @@ Stage 6: VIP Cavity Rebinding (GROMACS)
          └── VIP score = rebind_rate × (1 + selectivity)
     ↓ VIP 순위
 Stage 7: 합성 레시피 자동 생성
-         ├── Top 3 monomer + cross-linker + 비율 (+ 전역 porogen)
-         └── 합성 프로토콜 (free-radical polymerization)
+         ├── Top 조합 + cross-linker + porogen + 화학량론(Kass 기반 1:1/과잉)
+         ├── Chemistry-aware 보정: 이온화·자기회합·crosslinker 활성종·bleeding (문헌 감사)
+         └── 화학별 프로토콜 (free-radical / sol-gel / oxidative) + Design considerations
 ```
 
 ---
@@ -179,7 +182,7 @@ Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한
 - **H-bond 분석**: bidirectional HydrogenBondAnalysis (TPR topology, 전체 trajectory)
 - Template/monomer 식별: resid 기반 (acpype "UNL" resname 문제 회피)
 
-**합성 비율 자동 결정**: Contact frequency의 역비례 — 약한 결합 monomer를 더 많이 넣어 균등한 cavity 형성.
+**합성 비율 자동 결정** (`MD_RATIO_METHOD="ebn"`, 기본): **EBN(최대 동시 결합 수) 정비례** — 표적에 자리가 많은(EBN↑) monomer를 그만큼 더 많이 넣는다 (Yuan et al. 2024, 형제 프로젝트와 동일). `"contact_inverse"`로 바꾸면 약결합 monomer를 더 넣는 기존 방식(보상).
 
 ### Stage 6: VIP Cavity Rebinding (GROMACS)
 
@@ -219,13 +222,23 @@ VIP score = rebind_rate × (1 + selectivity)
 
 ### Stage 7: 합성 레시피 자동 생성
 
-**파일**: `code/pipeline/stage7_recipe.py`
+**파일**: `code/pipeline/stage7_recipe.py`, `code/pipeline/chemistry_aware.py`
 
-Stage 6 VIP 순위, Stage 5 합성 비율, Stage 4 MMSD 조합, Stage 3 cross-linker/porogen 추천을 종합하여 합성 프로토콜을 자동 생성한다.
+Stage 6 VIP 순위, Stage 5 합성 비율, Stage 4 MMSD 조합, Stage 3 cross-linker/porogen 추천을 종합하여 합성 프로토콜을 자동 생성한다. 중합 방식(free-radical/sol-gel/oxidative)에 맞는 프로토콜을 출력한다.
+
+**Chemistry-aware 보정** (`chemistry_aware.py`, 문헌 감사 반영 — 검증된 8 gap 중 6개):
+- **화학량론 (GAP 4+6)**: 결합에너지 → Kass 추정 → Kass>900 M⁻¹면 1:1 화학량론, 아니면 과잉 monomer. 고정 1:4 대체 (Wulff & Knorr 2001).
+- **이온화 (GAP 2)**: 이온화기 검출 + ion-pair microstate. acid–base 쌍이면 "중성 SMILES 랭킹 오류 가능" 경고 (ACS Appl. Polym. Mater. 2020).
+- **자기회합 (GAP 3)**: monomer 이합체화 ΔG (xTB) — 유리 monomer↓이나 비특이 자리 억제 (Zhang/Shimizu 2010).
+- **Crosslinker 활성종 (GAP 5)**: crosslinker–template 결합이 monomer보다 강하면 경고 (Shoravi/Olsson 2014).
+- **Bleeding (GAP 8)**: 제거 난이도 + 강결합 → 잔류 template 유출 위험 + dummy template 권고 (IJMS 2011).
+
+모든 보정은 레시피의 "Design considerations"에 인용과 함께 기재된다.
+(Stage 5 MD는 형태학 지표 **SASA/FFV**(GAP 7, RSC 2025)도 산출.)
 
 **출력**:
-- `synthesis_recipe.json`: Top 3 monomer + cross-linker + 비율
-- `synthesis_protocol.txt`: 단계별 합성 프로토콜 (free-radical polymerization)
+- `synthesis_recipe.json`: Top 3 monomer + cross-linker + 비율 + stoichiometry/speciation/self_association/bleeding
+- 프로토콜 텍스트: 화학별 단계 + Design considerations
 
 ---
 

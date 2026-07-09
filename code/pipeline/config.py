@@ -81,7 +81,7 @@ STAGE1_TOP_N = None
 # Stage 3 global-porogen scoring uses the top-k monomers by binding (T_k). Not a
 # hard funnel — all monomers still pass to Stage 4 (MMSD searches over them).
 STAGE3_TOP_N = 3
-N_WORKERS    = 8       # CPU parallel processes
+N_WORKERS    = 7       # CPU parallel processes
 N_GPU_WORKERS = 1      # GPU parallel processes (limited by VRAM)
 USE_GPU      = True    # Use GPU acceleration when available
 from pathlib import Path as _Path
@@ -206,6 +206,15 @@ MMSD_TOP_PC = 3                # MMSD가 산출하는 상위 조합(PC) 수
 MMSD_MD_TOP_N = 3              # Stage 5에서 MD로 검증할 상위 조합 수
 
 # ── Stage 5: MD Parameters ──
+# 합성 비율 결정 방식:
+# "ebn"             — EBN(최대 동시 결합 수) 정비례, 자리 많은 monomer↑ (Yuan 2024, 형제식)
+# "contact_inverse" — contact frequency 역비례, 약결합 monomer↑ (보상)
+MD_RATIO_METHOD = "ebn"
+# MM/GBSA binding free energy on the multi-monomer trajectory (GAP #1 중간판):
+# 단일 pose 엔탈피 → 실제 MD 궤적 기반 ΔG. gmx_MMPBSA + mpi4py 필요(설치됨).
+MD_MMPBSA = True
+MMPBSA_INTERVAL = 10        # 궤적 프레임 간격 (비용↓)
+MMPBSA_IGB = 5             # GB 모델 (2 or 5)
 MD_TIME_NS = 50              # Production MD time (ns)
 MD_CONTACT_CUTOFF = 6.0      # Å, contact frequency cutoff
 MD_BOX_SIZE = 4.0            # nm, initial box size

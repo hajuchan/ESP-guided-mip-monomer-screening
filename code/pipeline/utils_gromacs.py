@@ -1020,6 +1020,69 @@ def _copy_and_split_itp(src_itp: str, work_dir: Path, name: str) -> str:
 
 # ── Analysis ──
 
+def run_mmpbsa(work_dir: Path, interval: int = 10, igb: int = 5,
+               start_frac: float = 0.5, timeout: int = 3600) -> dict:
+    """MM/GBSA binding free energy of the template to the monomer/cross-linker
+    assembly from a Stage 5 MD trajectory (gmx_MMPBSA). Intermediate between the
+    single-pose enthalpy and a full-mixture free energy (audit GAP #1): real ΔG
+    (MM energy + GB solvation) averaged over the equilibrium ensemble.
+
+    Needs md.tpr / md.xtc / topol.top in work_dir and gmx_MMPBSA + mpi4py.
+    receptor = monomers+crosslinker, ligand = template (first non-solvent resid).
+    Returns {dG_bind_kcal, ...} or {error}. Never raises.
+    """
+    import shutil
+    import re
+    work_dir = Path(work_dir).resolve()
+    tpr, xtc, top = work_dir / "md.tpr", work_dir / "md.xtc", work_dir / "topol.top"
+    if not (tpr.exists() and xtc.exists() and top.exists()):
+        return {"error": "missing md.tpr/md.xtc/topol.top"}
+    if shutil.which("gmx_MMPBSA") is None:
+        return {"error": "gmx_MMPBSA not installed"}
+    try:
+        import MDAnalysis as mda
+        from MDAnalysis.selections.gromacs import SelectionWriter
+        u = mda.Universe(str(tpr), str(xtc))
+        non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+        if len(non_sol.residues) < 2:
+            return {"error": "need template + >=1 monomer for MM/PBSA"}
+        frid = non_sol.residues[0].resid
+        lig = u.select_atoms(f"resid {frid}")                       # template
+        rec = u.select_atoms(                                        # monomers + XL
+            f"not resname SOL NA CL Na+ Cl- and not resid {frid}")
+        ndx = work_dir / "mmpbsa_index.ndx"
+        with SelectionWriter(str(ndx), mode="w") as w:
+            w.write(rec, name="receptor")
+            w.write(lig, name="ligand")
+        n_frames = len(u.trajectory)
+        startframe = max(1, int(n_frames * start_frac))
+        inp = work_dir / "mmpbsa.in"
+        inp.write_text(
+            "&general\n"
+            f'sys_name="MIP", startframe={startframe}, endframe={n_frames}, '
+            f'interval={interval}, forcefields="leaprc.gaff2",\n/\n'
+            f"&gb\nigb={igb}, saltcon=0.150,\n/\n")
+        out = work_dir / "FINAL_RESULTS_MMPBSA.dat"
+        cmd = ["gmx_MMPBSA", "-O", "-i", str(inp), "-cs", str(tpr), "-ci", str(ndx),
+               "-cg", "receptor", "ligand", "-ct", str(xtc), "-cp", str(top),
+               "-o", str(out), "-nogui"]
+        logger.info(f"  MM/GBSA (igb={igb}, frames {startframe}-{n_frames})...")
+        r = subprocess.run(cmd, cwd=str(work_dir), capture_output=True,
+                           text=True, timeout=timeout)
+        if out.exists():
+            txt = out.read_text()
+            m = re.search(r"(?:ΔTOTAL|DELTA TOTAL|TOTAL)\s+([-\d.]+)", txt)
+            if m:
+                dg = round(float(m.group(1)), 3)
+                logger.info(f"  MM/GBSA ΔG_bind = {dg:+.3f} kcal/mol")
+                return {"dG_bind_kcal": dg, "method": f"MM/GBSA(igb={igb})",
+                        "startframe": startframe, "endframe": n_frames}
+        return {"error": "MM/PBSA produced no parseable ΔG",
+                "stderr": (r.stderr or "")[-400:]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def analyze_md(work_dir: Path, template_name: str = "TMP",
                cutoff_A: float = 6.0) -> dict:
     """Analyze MD trajectory: contact frequency, residence time, H-bonds, RDF.
@@ -1110,6 +1173,9 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
 
     results["contact_frequency"] = round(float(contact_freq), 4)
     results["mean_contacts_per_frame"] = round(float(mean_contacts_per_frame), 2)
+    # EBN (Yuan et al. 2024) = max simultaneous binding count of this monomer type
+    # to the template over the trajectory → drives the EBN-based synthesis ratio.
+    results["ebn_max_simultaneous"] = int(max(contact_per_frame)) if contact_per_frame else 0
     results["max_residence_frames"] = int(max_residence)
     results["mean_min_distance_A"] = round(float(np.mean(min_distances)), 2) if min_distances else None
     results["n_frames_analyzed"] = total_frames
@@ -1283,6 +1349,61 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
         logger.warning(f"  Interaction energy failed: {e}")
         results["interaction_energy_kJ"] = None
         results["ie_method"] = "failed"
+
+    # ── GAP 7: predicted morphology — fractional free volume + SASA ──
+    # RSC Mol. Syst. Des. Eng. 2025: pre-polymerization MD SASA/FFV predict BET
+    # surface area / porosity — the porogen-morphology axis Stage 3 omits.
+    try:
+        _vdw = {"H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80,
+                "B": 1.92, "Si": 2.10, "P": 1.80, "F": 1.47, "Cl": 1.75}
+        ffvs = []
+        for ts in u.trajectory[start_frame:]:
+            bx = ts.dimensions[:3]
+            v_box = float(bx[0] * bx[1] * bx[2])           # Å³
+            if v_box <= 0:
+                continue
+            v_occ = 0.0
+            for a in non_solvent.atoms:
+                el = (getattr(a, "element", "") or a.name[0]).capitalize()
+                r = _vdw.get(el, 1.7)
+                v_occ += (4.0 / 3.0) * np.pi * r ** 3
+            ffvs.append(1.0 - v_occ / v_box)
+        morph = {}
+        if ffvs:
+            morph["fractional_free_volume"] = round(float(np.mean(ffvs)), 4)
+        try:  # SASA of the polymer (non-solvent) via gmx sasa — best effort
+            xvg = work_dir / "sasa.xvg"
+            gmx(["sasa", "-s", top, "-f", traj, "-o", str(xvg),
+                 "-surface", "not resname SOL NA CL Na+ Cl-"], work_dir, timeout=600)
+            if xvg.exists():
+                vals = [float(l.split()[1]) for l in xvg.read_text().splitlines()
+                        if l and l[0] not in "#@"]
+                if vals:
+                    morph["sasa_nm2_mean"] = round(sum(vals) / len(vals), 3)
+        except Exception as _e:
+            morph["sasa_note"] = f"gmx sasa unavailable: {_e}"
+        results["morphology"] = morph
+        logger.info(f"  Morphology: FFV={morph.get('fractional_free_volume')} "
+                    f"SASA={morph.get('sasa_nm2_mean', 'n/a')} nm²")
+    except Exception as e:
+        logger.warning(f"  Morphology (SASA/FFV) failed: {e}")
+
+    # ── GAP 1 (partial): binding-mode heterogeneity from the MD ensemble ──
+    # Recognition-site heterogeneity is the defining trait of noncovalent MIPs
+    # (Karlsson JACS 2009); report the spread of the complex over the ensemble,
+    # not just the mean contact frequency.
+    try:
+        cpf = np.array(contact_per_frame[len(contact_per_frame) // 2:], dtype=float)
+        if cpf.size and cpf.mean() > 0:
+            cv = float(cpf.std() / cpf.mean())
+            results["binding_heterogeneity"] = {
+                "contact_cv": round(cv, 3),
+                "level": "high" if cv > 0.6 else "moderate" if cv > 0.3 else "low",
+                "note": "coefficient of variation of template–monomer contacts over "
+                        "the equilibrium ensemble (site-heterogeneity proxy).",
+            }
+    except Exception:
+        pass
 
     logger.info(f"  Analysis: contact_freq={results['contact_frequency']:.4f}, "
                 f"EBN={results.get('EBN', 0):.4f}, "

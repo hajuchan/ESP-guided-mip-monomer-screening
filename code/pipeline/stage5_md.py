@@ -143,6 +143,7 @@ def run_stage5(template_smiles: str = None,
                 "md_time_ns": MD_TIME_NS,
                 "contact_frequency": analysis.get("contact_frequency", 0),
                 "EBN": analysis.get("EBN", 0),
+                "ebn_max": analysis.get("ebn_max_simultaneous", 0),
                 "mean_min_distance_A": analysis.get("mean_min_distance_A"),
                 "n_frames_analyzed": analysis.get("n_frames_analyzed", 0),
                 "n_hbonds_mean": analysis.get("n_hbonds_mean", 0),
@@ -259,6 +260,12 @@ def run_stage5(template_smiles: str = None,
                                                       cutoff_A=MD_CONTACT_CUTOFF)
                     logger.info(f"  [PC{rank}] MD complete: contact="
                                 f"{combo['md_analysis'].get('contact_frequency', 0):.4f}")
+                    # GAP #1 (intermediate): MM/GBSA binding free energy from the MD
+                    if getattr(_cfg, "MD_MMPBSA", False):
+                        from .utils_gromacs import run_mmpbsa
+                        combo["mmpbsa"] = run_mmpbsa(
+                            mm_dir, interval=getattr(_cfg, "MMPBSA_INTERVAL", 10),
+                            igb=getattr(_cfg, "MMPBSA_IGB", 5))
                 except Exception as e:
                     combo["md_error"] = str(e)
                     logger.warning(f"  [PC{rank}] MD failed: {e}")
@@ -361,16 +368,25 @@ def _optimize_combination(all_results, monomer_library, out_path):
 
 
 def _recommend_ratios(results):
-    """Recommend synthesis ratios based on contact frequency inverse."""
+    """Recommend synthesis ratios. Default EBN-based (Yuan 2024): more
+    simultaneous binding sites → more copies; optional contact-freq inverse."""
+    from .config import MD_RATIO_METHOD
+    if MD_RATIO_METHOD == "ebn":
+        ebn = {r["monomer"]: r.get("ebn_max", 0)
+               for r in results if r.get("ebn_max", 0) > 0}
+        if ebn:
+            min_e = min(ebn.values())
+            ratios = {m: max(1, round(v / min_e)) for m, v in ebn.items()}
+            logger.info("\n  Recommended synthesis ratios (EBN direct, Yuan 2024):")
+            for m, ratio in sorted(ratios.items(), key=lambda x: -x[1]):
+                logger.info(f"    {m}: 1:{ratio} (EBN={ebn[m]})")
+            return
     contacts = {r["monomer"]: r["contact_frequency"]
                 for r in results if r.get("contact_frequency", 0) > 0}
     if not contacts:
         return
-
-    # Inverse contact frequency → weak binders need more monomer
     max_contact = max(contacts.values())
     ratios = {m: round(max_contact / c, 1) for m, c in contacts.items()}
-
     logger.info("\n  Recommended synthesis ratios (contact freq inverse):")
     for m, ratio in sorted(ratios.items(), key=lambda x: -x[1]):
         logger.info(f"    {m}: 1:{ratio:.1f} (contact_freq={contacts[m]:.4f})")

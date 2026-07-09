@@ -566,12 +566,14 @@ def optimize_top_candidates(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
     best_nums = None
     best_poss = None
     best_idx = 0
+    all_de = []                      # GAP 1: keep the whole pose ensemble
 
     for rank, ((c_num, c_pos), sp_energy) in enumerate(top_orientations):
         try:
             with tempfile.TemporaryDirectory(prefix=f"xtb_opt{rank}_") as td:
                 e_complex, opt_pos = xtb_optimize(c_num, c_pos, td)
             de = (e_complex - e_template - e_monomer) * HARTREE_TO_KCAL
+            all_de.append(round(de, 3))
             if de < best_de:
                 best_de = de
                 best_nums = c_num
@@ -595,6 +597,7 @@ def optimize_top_candidates(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
         "best_positions": best_poss,
         "best_rank": best_idx,
         "binding_site": binding_site_info,
+        "all_energies_kcal": all_de,      # GAP 1: pose ensemble
     }
 
 
@@ -934,8 +937,16 @@ def _quantumdock_single(monomer_name: str, monomer_mol: Chem.Mol,
     opt_result = optimize_top_candidates(template_mol, monomer_mol, top)
     de = opt_result["best_energy_kcal"]
     site = opt_result["binding_site"]
-    logger.info(f"  [{monomer_name}] Optimized → dE={de:+.3f} kcal/mol, "
-                f"site: atom {site['atom_idx']} ({site['symbol']}, {site['type']})")
+    # GAP 1 (partial): Boltzmann-weight the pose ensemble + site-heterogeneity
+    try:
+        from .chemistry_aware import ensemble_binding
+        ensemble = ensemble_binding(opt_result.get("all_energies_kcal"))
+    except Exception:
+        ensemble = {}
+    logger.info(f"  [{monomer_name}] Optimized → dE={de:+.3f} kcal/mol"
+                + (f", ⟨dE⟩_Boltz={ensemble['boltzmann_mean_kcal']:+.3f}, "
+                   f"n_eff={ensemble['n_effective_poses']}" if ensemble else "")
+                + f", site: atom {site['atom_idx']} ({site['symbol']}, {site['type']})")
 
     # Save optimized complex coordinates for Stage 2 DFT handoff
     # (RDKit Mol is not JSON-serializable, so store as atom list)
@@ -961,6 +972,7 @@ def _quantumdock_single(monomer_name: str, monomer_mol: Chem.Mol,
         "best_direction": f"site_{site['atom_idx']}_{site['type']}",
         "binding_site": site,
         "complex_coords": complex_coords,
+        "ensemble": ensemble,     # GAP 1: Boltzmann pose ensemble + heterogeneity
     }
 
 
