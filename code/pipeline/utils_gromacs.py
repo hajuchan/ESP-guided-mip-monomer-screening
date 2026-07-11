@@ -11,7 +11,9 @@ Key differences from Bio pipeline:
 """
 
 import logging
+import os
 import subprocess
+import sys
 import shutil
 from pathlib import Path
 from textwrap import dedent
@@ -20,6 +22,34 @@ logger = logging.getLogger(__name__)
 
 # ── GROMACS binary ──
 GMX_BIN = "gmx"  # Assumes 'source /usr/local/gromacs-gpu/bin/GMXRC' was run
+
+
+def _tool_env():
+    """Environment for external-tool subprocesses (acpype, gmx_MMPBSA) with the
+    active conda env's bin/ guaranteed on PATH.
+
+    acpype shells out to AmberTools (antechamber, sqm, tleap) and gmx_MMPBSA to
+    sander/MMPBSA.py; if the launching process has a stripped PATH (nohup, cron,
+    an IDE, a wrapper script) those binaries are invisible and EVERY molecule
+    parameterization fails silently — exactly the '0 MD results' failure mode.
+    Prepending sys.executable's dir (the env bin) makes the toolchain findable
+    regardless of how the pipeline was launched. Ported from the working sibling
+    (Monomer_screening_in_Bio/utils_gromacs.parameterize_monomer)."""
+    env = os.environ.copy()
+    conda_bin = str(Path(sys.executable).parent)
+    if conda_bin not in env.get("PATH", "").split(os.pathsep):
+        env["PATH"] = conda_bin + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def check_md_toolchain() -> dict:
+    """Preflight: verify the small-molecule MD toolchain is reachable. Returns
+    {tool: path-or-None}. A missing antechamber/sqm means acpype cannot assign
+    charges and all parameterization will fail — better to report loudly than to
+    emit 28 empty directories."""
+    env_path = _tool_env().get("PATH", "")
+    return {t: shutil.which(t, path=env_path)
+            for t in ("antechamber", "sqm", "tleap", "acpype", GMX_BIN)}
 
 # ── MDP Templates ──
 
@@ -189,26 +219,29 @@ def parameterize_small_molecule(smiles: str, name: str,
     pdb_path = output_dir / f"{name}.pdb"
     Chem.MolToPDBFile(mol, str(pdb_path))
 
-    # Run acpype for GAFF2 parameterization (via Python API to use conda env)
-    import sys
+    # Run acpype for GAFF2 parameterization (via Python API to use conda env).
+    # env=_tool_env() ensures AmberTools (antechamber/sqm) is on PATH — without
+    # it acpype fails for EVERY molecule when the launcher has a stripped PATH.
     acpype_cmd = [sys.executable, "-c",
                   "from acpype.cli import init_main; init_main()"]
     abs_pdb = str(pdb_path.resolve())  # Must be absolute path for acpype
     abs_dir = str(output_dir.resolve())
+    env = _tool_env()
+    result = None
     try:
         result = subprocess.run(
             acpype_cmd + ["-i", abs_pdb, "-b", name,
                           "-c", charge_method, "-a", "gaff2", "-o", "gmx"],
-            cwd=abs_dir,
-            capture_output=True, text=True, timeout=120,
+            cwd=abs_dir, env=env,
+            capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0 or "DOES NOT EXIST" in result.stdout:
             logger.warning(f"  acpype {charge_method} failed for {name}, trying gasteiger...")
             result = subprocess.run(
                 acpype_cmd + ["-i", abs_pdb, "-b", name,
                               "-c", "gas", "-a", "gaff2", "-o", "gmx"],
-                cwd=abs_dir,
-                capture_output=True, text=True, timeout=120,
+                cwd=abs_dir, env=env,
+                capture_output=True, text=True, timeout=600,
             )
     except Exception as e:
         logger.error(f"  acpype failed: {e}")
@@ -230,7 +263,16 @@ def parameterize_small_molecule(smiles: str, name: str,
     itp_files = [f for f in itp_files if "posre" not in f.name.lower()]
 
     if not itp_files:
-        return {"error": f"No ITP files found in {acpype_out}"}
+        # Surface acpype's own diagnostics — a bare "No ITP files" hides whether
+        # antechamber/sqm was missing, timed out, or the charge step failed.
+        tail = ""
+        if result is not None:
+            tail = (result.stderr or result.stdout or "")[-400:]
+        if tail and ("antechamber" in tail.lower() or "not found" in tail.lower()
+                     or "command not found" in tail.lower()):
+            tail = ("[toolchain] AmberTools (antechamber/sqm) unreachable — "
+                    "check `conda install -c conda-forge ambertools`. ") + tail
+        return {"error": f"No ITP files found in {acpype_out}. acpype said: {tail}"}
 
     return {
         "itp": str(itp_files[0]),
@@ -861,7 +903,8 @@ def _parameterize_boron_molecule(mol, name, output_dir, charge_method, boron_ind
         result = subprocess.run(
             acpype_cmd + ["-i", abs_pdb, "-b", name,
                           "-c", "gas", "-a", "gaff2", "-o", "gmx"],
-            cwd=abs_dir, capture_output=True, text=True, timeout=120)
+            cwd=abs_dir, env=_tool_env(),
+            capture_output=True, text=True, timeout=600)
     except Exception as e:
         return {"error": f"acpype failed for B→C substitution: {e}"}
 
@@ -1493,7 +1536,7 @@ print_res="within 6"
         ]
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
-            cwd=str(mmpbsa_dir)
+            cwd=str(mmpbsa_dir), env=_tool_env(),
         )
 
         # Parse results from FINAL_RESULTS_MMPBSA.dat

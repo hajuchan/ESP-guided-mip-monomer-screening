@@ -24,6 +24,88 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 
+# Recipe protocol chemistry → the crosslinker polymerization type it REQUIRES.
+# One-pot MIPs use a single polymerization chemistry (Liu 2017): a free-radical
+# (vinyl) network cannot incorporate a silane sol-gel crosslinker and vice-versa.
+_CHEM_TO_XL_POLY = {"free-radical": "vinyl", "sol-gel": "silane", "oxidative": None}
+_CHEM_DEFAULT_XL = {"free-radical": "EGDMA", "sol-gel": "TEOS", "oxidative": None}
+
+
+def _xl_polymerization(name):
+    """Classify a crosslinker's polymerization chemistry from its SMILES,
+    mirroring stage4_mmsd._detect_polymerization (Si→silane, non-aromatic
+    C=C→vinyl, else oxidative)."""
+    smi = CROSSLINKER_LIBRARY.get(name, "")
+    if not smi:
+        return "unknown"
+    try:
+        from rdkit import Chem
+        m = Chem.MolFromSmiles(smi)
+        if m is None:
+            return "unknown"
+        if m.HasSubstructMatch(Chem.MolFromSmarts("[Si]")):
+            return "silane"
+        if m.HasSubstructMatch(Chem.MolFromSmarts("[C;!a]=[C;!a]")):
+            return "vinyl"
+        return "oxidative"
+    except Exception:
+        return "unknown"
+
+
+def _select_crosslinker(base, chemistry, mmsd_xl):
+    """Pick a crosslinker whose chemistry matches the winning polymerization
+    route. Priority:
+      1. the crosslinker MMSD co-selected with the combo (matched by construction);
+      2. the Stage-3 screening recommendation, IF compatible;
+      3. the weakest-binding COMPATIBLE crosslinker from the full screening;
+      4. a sensible per-chemistry default.
+    Oxidative polymers self-crosslink → returns (None, reason)."""
+    need = _CHEM_TO_XL_POLY.get(chemistry, "vinyl")
+    if need is None:                       # oxidative → no molecular crosslinker
+        return None, "oxidative self-crosslinking (no molecular crosslinker)"
+
+    # 1) MMSD's own choice (already chemistry-matched with the combo)
+    if mmsd_xl and _xl_polymerization(mmsd_xl) == need:
+        return mmsd_xl, "MMSD combo (chemistry-matched)"
+
+    # 2) Stage-3 recommendation, only if compatible with the winning chemistry
+    rec = None
+    cl_path = base / "stage3" / "stage3_crosslinker.json"
+    if cl_path.exists():
+        try:
+            rec = json.load(open(cl_path)).get("recommended")
+        except Exception:
+            rec = None
+    if rec and _xl_polymerization(rec) == need:
+        return rec, "Stage 3 screening (compatible)"
+
+    # 3) weakest-binding COMPATIBLE crosslinker from the full screening
+    #    (least-negative avg dE = least template competition, chemistry-filtered)
+    feat = base / "features" / "crosslinker.json"
+    if feat.exists():
+        try:
+            data = json.load(open(feat))
+            best, best_be = None, float("-inf")
+            for name, solvs in data.items():
+                if _xl_polymerization(name) != need:
+                    continue
+                bes = [v.get("bsse_dE", v.get("raw_dE")) for v in solvs.values()
+                       if isinstance(v, dict) and
+                       (v.get("bsse_dE") is not None or v.get("raw_dE") is not None)]
+                if not bes:
+                    continue
+                avg = sum(bes) / len(bes)
+                if avg > best_be:
+                    best_be, best = avg, name
+            if best:
+                return best, "weakest-binding compatible (Stage 3 full screening)"
+        except Exception:
+            pass
+
+    # 4) per-chemistry default
+    return _CHEM_DEFAULT_XL.get(chemistry, "EGDMA"), "per-chemistry default"
+
+
 def run_stage7(output_dir: str = None) -> dict:
     """Generate synthesis recipe from pipeline results."""
     if output_dir is None:
@@ -92,17 +174,27 @@ def run_stage7(output_dir: str = None) -> dict:
         for i, (m, s) in enumerate(top3)
     ]
 
-    # ── Cross-linker ──
-    cl_path = base / "stage3" / "stage3_crosslinker.json"
-    if cl_path.exists():
-        with open(cl_path) as f:
-            cl = json.load(f)
-        recipe["crosslinker"] = cl.get("recommended", "EGDMA")
-        recipe["crosslinker_smiles"] = CROSSLINKER_LIBRARY.get(
-            recipe["crosslinker"], "")
-    else:
-        recipe["crosslinker"] = "EGDMA"  # default
-        recipe["crosslinker_smiles"] = CROSSLINKER_LIBRARY.get("EGDMA", "")
+    # ── Polymerization chemistry (winning MMSD combo) ──
+    # Determined here so the crosslinker can be kept chemically compatible.
+    chemistry = "free-radical"
+    mmsd_xl = None
+    mmsd_path = base / "stage4" / "mmsd_results.json"
+    if mmsd_path.exists():
+        try:
+            _top = (json.load(open(mmsd_path)).get("top_pcs") or [])
+            if _top:
+                chemistry = _top[0].get("synthesis_method") or "free-radical"
+                mmsd_xl = _top[0].get("crosslinker")
+        except Exception:
+            pass
+    recipe["polymerization"] = chemistry
+
+    # ── Cross-linker (must match the polymerization chemistry) ──
+    xl_name, xl_reason = _select_crosslinker(base, chemistry, mmsd_xl)
+    recipe["crosslinker"] = xl_name
+    recipe["crosslinker_smiles"] = (
+        CROSSLINKER_LIBRARY.get(xl_name, "") if xl_name else "")
+    recipe["crosslinker_source"] = xl_reason
 
     # ── Synthesis ratio ──
     # EBN-based (Yuan et al. 2024): more simultaneous binding sites (EBN↑) →
@@ -228,27 +320,20 @@ def run_stage7(output_dir: str = None) -> dict:
         except Exception:
             pass
 
-    # Polymerization chemistry from the winning MMSD combo (Stage 4).
-    chemistry = "free-radical"
-    mmsd_path = base / "stage4" / "mmsd_results.json"
-    if mmsd_path.exists():
-        try:
-            _top = (json.load(open(mmsd_path)).get("top_pcs") or [])
-            if _top:
-                chemistry = _top[0].get("synthesis_method") or "free-radical"
-        except Exception:
-            pass
-    recipe["polymerization"] = chemistry
+    # Polymerization chemistry + crosslinker already resolved above.
+    xl_disp = (f"{xl} ({CROSSLINKER_LIBRARY.get(xl, '')})" if xl
+               else "none (self-crosslinking)")
+    xl_ratio_disp = f"{ratio * 5:.0f}" if xl else "0 (self-crosslinking)"
 
     header = f"""=== MIP Synthesis Protocol ({chemistry}) ===
 
 Template: {TEMPLATE_NAME} ({TEMPLATE_SMILES})
 Monomer:  {best_monomer} ({MONOMER_LIBRARY.get(best_monomer, '')})
-Cross-linker: {xl} ({CROSSLINKER_LIBRARY.get(xl, '')})
+Cross-linker: {xl_disp}
 Solvent:  {solvent}
 
 Molar ratio (Template : Monomer : Cross-linker):
-  1 : {ratio:.0f} : {ratio * 5:.0f}
+  1 : {ratio:.0f} : {xl_ratio_disp}
 """
 
     if chemistry.startswith("sol-gel"):

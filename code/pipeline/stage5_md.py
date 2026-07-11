@@ -44,7 +44,20 @@ def run_stage5(template_smiles: str = None,
 
     Returns {monomer: {contact_freq, EBN, mean_dist, ...}}
     """
-    from .utils_gromacs import build_mip_system, run_md_pipeline, analyze_md
+    from .utils_gromacs import (build_mip_system, run_md_pipeline, analyze_md,
+                                check_md_toolchain)
+
+    # Preflight: acpype needs AmberTools (antechamber/sqm) reachable. If it is
+    # not, EVERY parameterization fails and the stage produces zero results —
+    # report that loudly up front rather than after 28 silent failures.
+    tools = check_md_toolchain()
+    missing = [t for t in ("antechamber", "sqm") if not tools.get(t)]
+    if missing:
+        logger.error(f"  ⚠ MD toolchain incomplete — missing {missing} on PATH. "
+                     f"acpype cannot assign GAFF2 charges; every monomer will "
+                     f"fail. Fix: conda install -c conda-forge ambertools")
+    else:
+        logger.info(f"  MD toolchain OK: antechamber={tools['antechamber']}")
 
     template_smiles = template_smiles or TEMPLATE_SMILES
     template_name = TEMPLATE_NAME if hasattr(__import__('pipeline.config', fromlist=['TEMPLATE_NAME']), 'TEMPLATE_NAME') else "TMP"
@@ -55,8 +68,13 @@ def run_stage5(template_smiles: str = None,
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Load monomer list
-    if monomer_names is None:
+    # Load monomer list.
+    # NOTE: treat an EMPTY list the same as None. run_pipeline passes
+    # prev_results["top_selective"]; if that is [] (e.g. an upstream stage
+    # returned nothing), a bare `is None` check would let MD iterate over zero
+    # monomers and finish in ~0 s — silently producing no trajectory. Falling
+    # back to the Stage-3 ranking file makes the stage self-healing.
+    if not monomer_names:
         for src in [out_path.parent / "stage3" / "stage3_top.json",
                     out_path.parent / "stage1" / "stage1_top.json"]:
             if src.exists():
