@@ -28,7 +28,7 @@ from .config import (
     TEMPERATURE, OUTPUT_DIR, OUTPUT_DIRS,
     MD_RATIO_SCREENING, MD_RATIOS_TO_TEST, MD_TEMPLATE_MONOMER_RATIO,
     MD_TIME_NS, MD_CONTACT_CUTOFF, MD_BOX_SIZE,
-    MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO,
+    MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO, MD_MULTI_MONOMER,
     CROSSLINKER_LIBRARY,
 )
 
@@ -194,7 +194,10 @@ def run_stage5(template_smiles: str = None,
     _print_summary(all_results)
 
     # ── Multi-monomer MD: validate the top-N MMSD combinations ──
-    from .config import (MD_MULTI_MONOMER, MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO)
+    # (MD_MULTI_MONOMER / MD_INCLUDE_CROSSLINKER / MD_CROSSLINKER_RATIO are
+    # imported at module scope; re-importing them here would make Python treat
+    # them as function-locals for the WHOLE function → UnboundLocalError at the
+    # single-monomer loop above, which used them before this line ran.)
     from . import config as _cfg
     md_top_n = getattr(_cfg, "MMSD_MD_TOP_N", 3)
     if MD_MULTI_MONOMER and len(all_results) >= 2:
