@@ -23,6 +23,17 @@ import sys
 import time
 from pathlib import Path
 
+# Allow running directly as a script (python run_pipeline.py …) in addition to
+# `python -m pipeline.run_pipeline`. A bare script run has no package context, so
+# the relative imports below (from .config import …) would raise "attempted
+# relative import with no known parent package". Registering __package__ and
+# putting the package's parent dir on sys.path makes both invocations work.
+if __package__ in (None, ""):
+    import os as _os
+    sys.path.insert(
+        0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    __package__ = "pipeline"
+
 from .config import OUTPUT_DIR
 
 logger = logging.getLogger(__name__)
