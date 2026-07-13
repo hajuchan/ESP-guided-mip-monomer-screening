@@ -59,39 +59,67 @@ def run_crosslinker_screening(
 
     n_tasks = len(crosslinker_library) * len(solvents)
     max_workers = N_GPU_WORKERS if USE_GPU else N_WORKERS
+
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    json_path = out_path / "crosslinker.json"
+
+    # ── Resume: reuse already-computed (crosslinker, solvent) pairs ──
+    # Each pair is an expensive DFT job (~7 min); recomputing a completed
+    # screening every run wasted hours. Load the cache and only compute the
+    # missing pairs (failures aren't cached, so they retry — e.g. TRIM OOM).
+    results: dict = {}
+    if json_path.exists():
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                results = json.load(f)
+        except Exception:
+            results = {}
+
+    def _cached(cl, sol):
+        return isinstance(results.get(cl), dict) and sol in results[cl]
+
+    pending = [(cl, smi, sol, eps)
+               for cl, smi in crosslinker_library.items()
+               for sol, eps in solvents.items()
+               if not _cached(cl, sol)]
+    n_cached = n_tasks - len(pending)
+
     logger.info(
         f"Cross-linker screening: {len(crosslinker_library)} cross-linkers "
         f"x {len(solvents)} solvents = {n_tasks} DFT jobs "
-        f"(workers={max_workers}, GPU={USE_GPU})"
+        f"({n_cached} cached, {len(pending)} to compute; "
+        f"workers={max_workers}, GPU={USE_GPU})"
     )
+    if not pending:
+        logger.info("  all pairs cached — skipping DFT")
 
-    # ── Parallel DFT calculations ───────────────────────────────────
+    # ── Parallel DFT calculations (only the missing pairs) ──────────
     raw_results = {}  # (cl_name, sol_name) -> dft result dict
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for cl_name, cl_smiles in crosslinker_library.items():
-            for sol_name, eps in solvents.items():
+    if pending:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for cl_name, cl_smiles, sol_name, eps in pending:
                 fut = executor.submit(
                     compute_dft_binding,
                     cl_name, cl_smiles, template_smiles, sol_name, eps,
                 )
                 futures[fut] = (cl_name, sol_name)
 
-        for future in as_completed(futures):
-            cl_name, sol_name = futures[future]
-            res = future.result()
-            raw_results[(cl_name, sol_name)] = res
-            if res["success"]:
-                logger.info(
-                    f"  {cl_name:>10s}/{sol_name:<15s}: "
-                    f"raw={res['raw_dE_kcal']:+.3f}, "
-                    f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
-                )
-            else:
-                logger.warning(f"  {cl_name}/{sol_name}: FAILED – {res.get('error', 'unknown')}")
+            for future in as_completed(futures):
+                cl_name, sol_name = futures[future]
+                res = future.result()
+                raw_results[(cl_name, sol_name)] = res
+                if res["success"]:
+                    logger.info(
+                        f"  {cl_name:>10s}/{sol_name:<15s}: "
+                        f"raw={res['raw_dE_kcal']:+.3f}, "
+                        f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
+                    )
+                else:
+                    logger.warning(f"  {cl_name}/{sol_name}: FAILED – {res.get('error', 'unknown')}")
 
-    # ── Assess and structure results ────────────────────────────────
-    results: dict = {}
+    # ── Assess NEW results and merge into the cached set ────────────
     for (cl_name, sol_name), res in raw_results.items():
         if not res["success"]:
             continue
@@ -115,10 +143,7 @@ def run_crosslinker_screening(
             "reason": reason,
         }
 
-    # ── Save JSON ───────────────────────────────────────────────────
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    json_path = out_path / "crosslinker.json"
+    # ── Save merged JSON ────────────────────────────────────────────
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     logger.info(f"Results saved to {json_path}")

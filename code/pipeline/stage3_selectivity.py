@@ -598,9 +598,12 @@ def run_stage3(template_smiles: str = None,
         logger.info("\n--- Cross-linker screening ---")
         try:
             from .crosslinker import run_crosslinker_screening
+            # Write to the shared features/ cache (same file the post-pipeline
+            # screening uses) so the two calls reuse each other's results
+            # instead of recomputing the same 18 DFT jobs twice.
             cl_results = run_crosslinker_screening(
                 template_smiles=template_smiles,
-                output_dir=str(out_path))
+                output_dir=str(out_path.parent / "features"))
             # Recommend best cross-linker (weakest template binding)
             if cl_results:
                 best_cl = None
