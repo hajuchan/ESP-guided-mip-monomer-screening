@@ -129,13 +129,15 @@ def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
 
     # Find Stage 5 trajectory
     traj = s4 / "md.xtc"
-    top = s4 / "npt.gro"
     topol = s4 / "topol.top"
 
-    if not traj.exists() or not top.exists():
+    if not traj.exists():
         raise FileNotFoundError(f"Stage 5 trajectory not found in {s4}")
 
-    u = mda.Universe(str(top), str(traj))
+    # Robust topology load — newer GROMACS .tpr (tpx v138) is unreadable by the
+    # installed MDAnalysis; load_universe falls back to a .gro structure.
+    from .utils_gromacs import load_universe
+    u = load_universe(s4, traj)
     logger.info(f"  Trajectory: {len(u.trajectory)} frames, {u.atoms.n_atoms} atoms")
 
     # Identify template and monomer atoms

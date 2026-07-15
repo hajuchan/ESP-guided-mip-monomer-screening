@@ -51,6 +51,32 @@ def check_md_toolchain() -> dict:
     return {t: shutil.which(t, path=env_path)
             for t in ("antechamber", "sqm", "tleap", "acpype", GMX_BIN)}
 
+
+def load_universe(work_dir, traj=None, prefer_tpr=True):
+    """Create an MDAnalysis Universe, tolerant of GROMACS/MDAnalysis version
+    skew. Newer GROMACS (2026 → tpx v138) writes .tpr files the installed
+    MDAnalysis TPRParser cannot read (NotImplementedError), which otherwise
+    aborts EVERY trajectory analysis. md.tpr is tried first (it carries
+    charges/masses for better H-bond typing) but on ANY parse failure we fall
+    back to a .gro structure, which MDAnalysis reads version-independently —
+    sufficient for contact/distance/RDF/selection work on the existing xtc."""
+    import MDAnalysis as mda
+    work_dir = Path(work_dir)
+    tops = []
+    if prefer_tpr and (work_dir / "md.tpr").exists():
+        tops.append(work_dir / "md.tpr")
+    tops += [work_dir / g for g in ("md.gro", "npt.gro", "em.gro", "ions.gro")
+             if (work_dir / g).exists()]
+    last = None
+    for t in tops:
+        try:
+            return mda.Universe(str(t), str(traj)) if traj else mda.Universe(str(t))
+        except Exception as e:
+            last = e
+            logger.warning(f"  topology {t.name} unreadable by MDAnalysis "
+                           f"({type(e).__name__}); falling back to next")
+    raise (last or FileNotFoundError(f"no usable topology in {work_dir}"))
+
 # ── MDP Templates ──
 
 MDP_EM = dedent("""\
@@ -1085,7 +1111,7 @@ def run_mmpbsa(work_dir: Path, interval: int = 10, igb: int = 5,
     try:
         import MDAnalysis as mda
         from MDAnalysis.selections.gromacs import SelectionWriter
-        u = mda.Universe(str(tpr), str(xtc))
+        u = load_universe(Path(tpr).parent, xtc)
         non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
         if len(non_sol.residues) < 2:
             return {"error": "need template + >=1 monomer for MM/PBSA"}
@@ -1157,7 +1183,7 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
     if not Path(top).exists():
         return {"error": "Topology not found"}
 
-    u = mda.Universe(top, traj)
+    u = load_universe(work_dir, traj)
 
     # Identify template vs monomer by residue order
     # acpype assigns all molecules as "UNL", so we use resid:
@@ -1294,7 +1320,7 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
         # Use full trajectory (not reduced) for H-bond detection
         full_traj = str(work_dir / "md.xtc")
         if Path(full_traj).exists() and Path(top).exists():
-            u_full = mda.Universe(top, full_traj)
+            u_full = load_universe(work_dir, full_traj)
             non_sol_full = u_full.select_atoms("not resname SOL NA CL Na+ Cl-")
             frid = non_sol_full.residues[0].resid
             n_frames_full = len(u_full.trajectory)
@@ -1485,7 +1511,7 @@ def _compute_mmpbsa(work_dir, template_resid, start_frame=0):
 
     # Create index groups
     import MDAnalysis as mda
-    u = mda.Universe(str(tpr))
+    u = load_universe(Path(tpr).parent)
     non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
     tmpl = u.select_atoms(f"resid {template_resid}")
     mono = non_sol.select_atoms(f"not resid {template_resid}")
@@ -1630,7 +1656,7 @@ def _compute_interaction_energy(work_dir, template_resid, start_frame=0):
 
     # Create index file with template and monomer groups
     import MDAnalysis as mda
-    u = mda.Universe(str(tpr))
+    u = load_universe(Path(tpr).parent)
     non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
     tmpl_indices = u.select_atoms(f"resid {template_resid}").indices
     mono_indices = non_sol.select_atoms(f"not resid {template_resid}").indices
