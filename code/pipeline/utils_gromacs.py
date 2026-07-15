@@ -471,7 +471,7 @@ MIP multi-monomer pre-polymerization
              "-o", "solvated.gro", "-p", "topol.top"], work_dir)
 
     gmx(["grompp", "-f", "em.mdp", "-c", "solvated.gro",
-         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "10"], work_dir)
+         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "50"], work_dir)
     gmx(["genion", "-s", "ions.tpr", "-o", "ions.gro",
          "-p", "topol.top", "-pname", "NA", "-nname", "CL", "-neutral"],
         work_dir, input_text="SOL\n")
@@ -561,7 +561,7 @@ def build_mip_system(template_smiles: str, template_name: str,
 
     # Add ions
     gmx(["grompp", "-f", "em.mdp", "-c", "solvated.gro",
-         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "10"],
+         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "50"],
         work_dir)
     gmx(["genion", "-s", "ions.tpr", "-o", "ions.gro",
          "-p", "topol.top", "-pname", "NA", "-nname", "CL", "-neutral"],
@@ -765,7 +765,7 @@ def run_md_pipeline(work_dir: Path, time_ns: float = 50.0,
     if not (work_dir / "em.gro").exists():
         logger.info("  EM...")
         gmx(["grompp", "-f", "em.mdp", "-c", "ions.gro",
-             "-p", "topol.top", "-o", "em.tpr", "-maxwarn", "10"], work_dir)
+             "-p", "topol.top", "-o", "em.tpr", "-maxwarn", "50"], work_dir)
         gmx(["mdrun", "-deffnm", "em", "-nb", "gpu"], work_dir, timeout=300)
     else:
         logger.info("  EM: FOUND (skipping)")
@@ -779,7 +779,7 @@ def run_md_pipeline(work_dir: Path, time_ns: float = 50.0,
         nvt_mdp = MDP_NVT.format(nsteps=50000, dt=dt, temperature=temperature)
         (work_dir / "nvt.mdp").write_text(nvt_mdp)
         gmx(["grompp", "-f", "nvt.mdp", "-c", "em.gro", "-r", "em.gro",
-             "-p", "topol.top", "-o", "nvt.tpr", "-maxwarn", "10"], work_dir)
+             "-p", "topol.top", "-o", "nvt.tpr", "-maxwarn", "50"], work_dir)
         gmx(["mdrun", "-deffnm", "nvt", "-nb", "gpu"], work_dir, timeout=600)
     else:
         logger.info("  NVT: FOUND (skipping)")
@@ -790,7 +790,7 @@ def run_md_pipeline(work_dir: Path, time_ns: float = 50.0,
         npt_mdp = MDP_NPT.format(nsteps=50000, dt=dt, temperature=temperature)
         (work_dir / "npt.mdp").write_text(npt_mdp)
         gmx(["grompp", "-f", "npt.mdp", "-c", "nvt.gro", "-r", "nvt.gro",
-             "-t", "nvt.cpt", "-p", "topol.top", "-o", "npt.tpr", "-maxwarn", "10"], work_dir)
+             "-t", "nvt.cpt", "-p", "topol.top", "-o", "npt.tpr", "-maxwarn", "50"], work_dir)
         gmx(["mdrun", "-deffnm", "npt", "-nb", "gpu"], work_dir, timeout=600)
     else:
         logger.info("  NPT: FOUND (skipping)")
@@ -806,7 +806,7 @@ def run_md_pipeline(work_dir: Path, time_ns: float = 50.0,
         (work_dir / "md.mdp").write_text(prod_mdp)
         gmx(["grompp", "-f", "md.mdp", "-c", "npt.gro",
              "-t", "npt.cpt", "-p", "topol.top", "-o", "md.tpr",
-             "-maxwarn", "10"], work_dir)
+             "-maxwarn", "50"], work_dir)
 
     # Build mdrun command with GPU optimization
     md_cmd = ["mdrun", "-deffnm", "md", "-v"]
@@ -1443,7 +1443,7 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
         try:  # SASA of the polymer (non-solvent) via gmx sasa — best effort
             xvg = work_dir / "sasa.xvg"
             gmx(["sasa", "-s", top, "-f", traj, "-o", str(xvg),
-                 "-surface", "not resname SOL NA CL Na+ Cl-"], work_dir, timeout=600)
+                 "-surface", "not resname SOL NA CL"], work_dir, timeout=600)
             if xvg.exists():
                 vals = [float(l.split()[1]) for l in xvg.read_text().splitlines()
                         if l and l[0] not in "#@"]
@@ -1689,7 +1689,7 @@ energygrps  = Template Monomer
         # grompp with custom index
         gmx(["grompp", "-f", "ie.mdp", "-c", str(work_dir / "npt.gro"),
              "-p", str(work_dir / "topol.top"), "-n", "ie.ndx",
-             "-o", "ie.tpr", "-maxwarn", "10"], ie_dir)
+             "-o", "ie.tpr", "-maxwarn", "50"], ie_dir)
 
         # mdrun -rerun over trajectory
         gmx(["mdrun", "-s", "ie.tpr", "-rerun", str(traj),
