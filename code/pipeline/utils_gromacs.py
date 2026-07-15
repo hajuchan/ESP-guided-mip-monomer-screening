@@ -209,6 +209,163 @@ def gmx(cmd_args: list, work_dir: Path, input_text: str = None,
 
 # ── Molecule Parameterization ──
 
+# ── PolCA Organosilane Force Field (Jorge et al., ACS Phys. Chem. Au 2021) ──
+# GAFF2/acpype cannot type Si. PolCA supplies GROMACS-compatible organosilane
+# LJ parameters, letting silane monomers (APTES, MPTMS, …) run MD instead of
+# being dropped. The .itp/.gro are built directly: GAFF2 types for the organic
+# part (Si→S proxy for Gasteiger charges) + PolCA LJ for Si. The embedded
+# [ atomtypes ] is split out by _copy_and_split_itp; duplicate GAFF2 types
+# across molecules become grompp warnings that -maxwarn absorbs, while the
+# unique Si type is defined once. Ported from the sibling Bio pipeline.
+_POLCA_SI_LJ = {
+    "Si0": {"sigma": 0.580, "eps": 0.108},   # 4 alkyl
+    "Si1": {"sigma": 0.551, "eps": 0.108},   # 3 alkyl, 1 O
+    "Si2": {"sigma": 0.522, "eps": 0.108},   # 2 alkyl, 2 O
+    "Si3": {"sigma": 0.493, "eps": 0.108},   # 1 alkyl, 3 O
+    "Si4": {"sigma": 0.464, "eps": 0.108},   # 0 alkyl, 4 O (TEOS-like)
+}
+
+
+def _classify_si_type(smiles: str) -> str:
+    """PolCA Si type from the number of O neighbours on the Si atom."""
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return "Si4"
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() == 14:
+            n_o = sum(1 for n in atom.GetNeighbors() if n.GetAtomicNum() == 8)
+            return f"Si{n_o}" if f"Si{n_o}" in _POLCA_SI_LJ else "Si4"
+    return "Si4"
+
+
+def _generate_silane_itp(name: str, smiles: str, output_dir) -> dict:
+    """Generate GROMACS .itp/.gro for a silane using PolCA Si + GAFF2 organic
+    parameters (Jorge 2021). Returns {itp, gro, si_type, method}."""
+    from rdkit import Chem
+    from rdkit.Chem import AllChem, rdMolTransforms
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return {"error": f"Invalid SMILES: {smiles}"}
+    mol = Chem.AddHs(mol)
+    p = AllChem.ETKDGv3(); p.useRandomCoords = True; p.randomSeed = 42
+    if AllChem.EmbedMolecule(mol, p) != 0:
+        return {"error": "3D embedding failed"}
+    try:
+        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+    except Exception:
+        pass
+
+    # Charges: Si→S proxy for Gasteiger (Si unsupported), then force Si=+0.9
+    rw = Chem.RWMol(mol)
+    si_idx = [a.GetIdx() for a in rw.GetAtoms() if a.GetAtomicNum() == 14]
+    for idx in si_idx:
+        rw.GetAtomWithIdx(idx).SetAtomicNum(16)
+    AllChem.ComputeGasteigerCharges(rw)
+    charges = [float(rw.GetAtomWithIdx(i).GetDoubleProp("_GasteigerCharge"))
+               for i in range(rw.GetNumAtoms())]
+    for idx in si_idx:
+        charges[idx] = 0.9
+
+    si_type = _classify_si_type(smiles)
+    si_lj = _POLCA_SI_LJ[si_type]
+    conf = mol.GetConformer()
+    n_atoms = mol.GetNumAtoms()
+
+    etype = {6: "c3", 1: "h1", 8: "oh", 7: "n3", 14: si_type, 16: "ss", 5: "c3"}
+    mmap = {1: 1.008, 6: 12.011, 7: 14.007, 8: 15.999,
+            14: 28.086, 16: 32.065, 5: 10.811}
+
+    alines = []
+    for i in range(n_atoms):
+        a = mol.GetAtomWithIdx(i)
+        e = a.GetAtomicNum()
+        alines.append(
+            f"    {i+1:5d} {etype.get(e,'c3'):>10s} 1    {name:>5s} "
+            f"{a.GetSymbol()+str(i+1):>5s} {i+1:5d} {charges[i]:10.4f} "
+            f"{mmap.get(e,12.011):10.4f}")
+
+    itp_path = output_dir / f"{name}.itp"
+    _gaff2_lj = {
+        "c3": (0.33977, 0.45104), "h1": (0.24220, 0.08703),
+        "oh": (0.32429, 0.38911), "ho": (0.05379, 0.01966),
+        "n3": (0.33210, 0.41236), "hn": (0.11065, 0.04184),
+        "os": (0.31561, 0.30376), "ha": (0.26255, 0.06736),
+        "hc": (0.26002, 0.08703), "ss": (0.35636, 1.04600),
+        "ca": (0.33152, 0.41338), "c1": (0.34790, 0.66777),
+        "n1": (0.32735, 0.45940), "c2": (0.33152, 0.41338),
+    }
+    used_types = {etype.get(mol.GetAtomWithIdx(i).GetAtomicNum(), "c3")
+                  for i in range(n_atoms)}
+    at_lines = ["; name  bond_type  mass    charge  ptype  sigma       epsilon"]
+    at_lines.append(f"  {si_type}  {si_type}  {28.086:.3f}  0.000  A  "
+                    f"{si_lj['sigma']:.5e}  {si_lj['eps']:.5e}")
+    _m = {"c3": 12.011, "h1": 1.008, "oh": 15.999, "ho": 1.008, "n3": 14.007,
+          "hn": 1.008, "os": 15.999, "ha": 1.008, "hc": 1.008, "ss": 32.065,
+          "ca": 12.011, "c1": 12.011, "n1": 14.007, "c2": 12.011}
+    for t in sorted(used_types):
+        if t != si_type and t in _gaff2_lj:
+            s, e = _gaff2_lj[t]
+            at_lines.append(f"  {t}  {t}  {_m.get(t,12.011):.3f}  0.000  A  {s:.5e}  {e:.5e}")
+    atomtypes_section = "[ atomtypes ]\n" + "\n".join(at_lines) + "\n\n"
+
+    _std_bond_len = {
+        (6, 6): 0.1529, (6, 1): 0.1090, (6, 8): 0.1430, (6, 7): 0.1470,
+        (6, 14): 0.1860, (8, 14): 0.1640, (8, 1): 0.0960, (7, 1): 0.1010,
+        (14, 14): 0.2340, (6, 16): 0.1810, (16, 1): 0.1340,
+    }
+    blines = []
+    for bond in mol.GetBonds():
+        i = bond.GetBeginAtomIdx() + 1
+        j = bond.GetEndAtomIdx() + 1
+        e1 = mol.GetAtomWithIdx(bond.GetBeginAtomIdx()).GetAtomicNum()
+        e2 = mol.GetAtomWithIdx(bond.GetEndAtomIdx()).GetAtomicNum()
+        dist = _std_bond_len.get((min(e1, e2), max(e1, e2)), 0.1500)
+        blines.append(f"  {i:5d}  {j:5d}    1    {dist:.4f}  500000.0")
+
+    aangle_lines = []
+    for atom in mol.GetAtoms():
+        idx = atom.GetIdx()
+        neigh = [n.GetIdx() for n in atom.GetNeighbors()]
+        for ni in range(len(neigh)):
+            for nj in range(ni+1, len(neigh)):
+                try:
+                    angle = rdMolTransforms.GetAngleDeg(conf, neigh[ni], idx, neigh[nj])
+                    aangle_lines.append(
+                        f"  {neigh[ni]+1:5d}  {idx+1:5d}  {neigh[nj]+1:5d}    1    {angle:.2f}  500.0")
+                except Exception:
+                    pass
+
+    bonds_section = "[ bonds ]\n" + "\n".join(blines) + "\n" if blines else ""
+    angles_section = "\n[ angles ]\n" + "\n".join(aangle_lines) + "\n" if aangle_lines else ""
+
+    itp_path.write_text(
+        f"; {name} - PolCA Si (Jorge 2021) + GAFF2\n"
+        f"{atomtypes_section}"
+        f"[ moleculetype ]\n{name}    3\n\n[ atoms ]\n"
+        + "\n".join(alines) + "\n\n" + bonds_section + angles_section,
+        encoding="utf-8")
+
+    gro_path = output_dir / f"{name}.gro"
+    gl = [f"{name} silane", f" {n_atoms}"]
+    for i in range(n_atoms):
+        pos = conf.GetAtomPosition(i)
+        a = mol.GetAtomWithIdx(i)
+        gl.append(f"{1:5d}{name:>5s}{a.GetSymbol()+str(i+1):>5s}{i+1:5d}"
+                  f"{pos.x/10:8.3f}{pos.y/10:8.3f}{pos.z/10:8.3f}")
+    gl.append("   5.00000   5.00000   5.00000")
+    gro_path.write_text("\n".join(gl) + "\n", encoding="utf-8")
+
+    logger.info(f"  {name}: PolCA topology ({si_type}, "
+                f"sigma={si_lj['sigma']}, eps={si_lj['eps']})")
+    return {"itp": str(itp_path), "gro": str(gro_path),
+            "si_type": si_type, "method": "PolCA"}
+
+
 def parameterize_small_molecule(smiles: str, name: str,
                                  output_dir: Path,
                                  charge_method: str = "bcc") -> dict:
@@ -235,11 +392,11 @@ def parameterize_small_molecule(smiles: str, name: str,
         logger.info(f"  {name}: contains B — using B→C substitution for GAFF2 parameterization")
         return _parameterize_boron_molecule(mol, name, output_dir, charge_method, boron_indices)
 
-    # Check for Si → currently unsupported
+    # Check for Si → PolCA organosilane force field (GAFF2 has no Si type)
     has_si = any(a.GetAtomicNum() == 14 for a in mol.GetAtoms())
     if has_si:
-        logger.warning(f"  {name}: contains Si — unsupported by GAFF2, skipping")
-        return {"error": f"Si in {name} (no GAFF2 parameters, need PolCA)"}
+        logger.info(f"  {name}: contains Si → PolCA organosilane parameters (Jorge 2021)")
+        return _generate_silane_itp(name, smiles, output_dir)
 
     # Save as PDB
     pdb_path = output_dir / f"{name}.pdb"
