@@ -301,6 +301,28 @@ def _try_gpu(mf):
     return mf
 
 
+def _is_gpu_oom(e) -> bool:
+    """Heuristically detect a GPU out-of-memory error (large molecules like the
+    TRIM crosslinker exceed GPU VRAM). Not a fundamental failure — the same SCF
+    runs fine on CPU where memory is bounded only by system RAM."""
+    s = f"{type(e).__name__}: {e}".lower()
+    return (any(k in s for k in (
+        "outofmemory", "out of memory", "cudaerrormemoryallocation",
+        "memoryallocation", "cublas_status_alloc_failed", "cusolver"))
+        or ("cuda" in s and "memory" in s))
+
+
+def _free_gpu_memory():
+    """Release cupy's cached GPU blocks so later jobs (or the CPU retry) start
+    from a clean slate."""
+    try:
+        import cupy
+        cupy.get_default_memory_pool().free_all_blocks()
+        cupy.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+
+
 def _apply_d3bj(mf, mol_pyscf):
     """Add D3BJ dispersion correction and return correction energy."""
     try:
@@ -357,7 +379,16 @@ def dft_energy(atom_str: str, basis: str, eps: float,
     if use_gpu:
         mf = _try_gpu(mf)
 
-    mf.kernel()
+    try:
+        mf.kernel()
+    except Exception as e:
+        if use_gpu and _is_gpu_oom(e):
+            logger.warning(f"  GPU OOM ({type(e).__name__}); retrying this "
+                           f"molecule on CPU (slower, identical energy)")
+            _free_gpu_memory()
+            return dft_energy(atom_str, basis, eps, tmpdir,
+                              use_gpu=False, functional=functional)
+        raise
     return mf.e_tot
 
 
@@ -395,7 +426,16 @@ def dft_energy_ghost(real_atom_str: str, ghost_atom_str: str,
     if use_gpu:
         mf = _try_gpu(mf)
 
-    mf.kernel()
+    try:
+        mf.kernel()
+    except Exception as e:
+        if use_gpu and _is_gpu_oom(e):
+            logger.warning(f"  GPU OOM ({type(e).__name__}) in BSSE term; "
+                           f"retrying on CPU")
+            _free_gpu_memory()
+            return dft_energy_ghost(real_atom_str, ghost_atom_str, basis, eps,
+                                    tmpdir, use_gpu=False, functional=functional)
+        raise
     return mf.e_tot
 
 
