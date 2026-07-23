@@ -30,6 +30,8 @@ from .config import (
     TEMPERATURE, OUTPUT_DIR, OUTPUT_DIRS,
     VIP_N_SNAPSHOTS, VIP_RESTRAINT_K, VIP_REMOVAL_NS,
     VIP_REBINDING_NS, VIP_RMSD_THRESHOLD, VIP_REMOVAL_THRESHOLD,
+    VIP_N_RESTARTS, VIP_MMPBSA, VIP_EXTEND_NS,
+    MMPBSA_INTERVAL, MMPBSA_IGB,
 )
 from .utils_gromacs import gmx, MDP_NVT, MDP_PRODUCTION
 
@@ -380,117 +382,157 @@ def _run_removal_test(snap_dir, tmpl_pos_init, tmpl_indices):
 #  Rebinding MD
 # ═══════════════════════════════════════════════════════════════
 
-def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label,
-                    snapshot_idx=0):
-    """Displace template, run MD, check if template returns to cavity."""
+def _analyze_rebind_traj(rebind_dir, ref_gro, tmpl_indices, tmpl_pos_init, label,
+                          with_mmpbsa=None):
+    """Compute rebinding metrics from an EXISTING trajectory (no MD run):
+    Q4 equilibrium RMSD, Q1→Q4 drift/convergence, residence, contacts, and
+    optional MM-GBSA ΔG. Shared by the live run, reanalyze, and extend paths."""
     import MDAnalysis as mda
-
-    rebind_dir = Path(snap_dir) / f"rebind_{label}"
-    rebind_dir.mkdir(parents=True, exist_ok=True)
-
+    rebind_dir = Path(rebind_dir)
+    traj = rebind_dir / "md.xtc"
+    if not traj.exists():
+        return {"error": "Trajectory not generated", "rebound": False}
+    top = rebind_dir / ref_gro
+    if not top.exists():
+        top = next((rebind_dir / c for c in ("conf.gro", "em.gro", "md.gro")
+                    if (rebind_dir / c).exists()), rebind_dir / "conf.gro")
     try:
-        # Start from frame with template displaced slightly
+        u = mda.Universe(str(top), str(traj))
+    except Exception as e:
+        return {"error": f"universe: {e}", "rebound": False}
+
+    idx = " ".join(str(i) for i in tmpl_indices)
+    template = u.select_atoms(f"index {idx}")
+    monomers = u.select_atoms(f"not resname SOL NA CL Na+ Cl- and not index {idx}")
+    rmsds, contacts = [], []
+    for ts in u.trajectory:
+        rmsds.append(_compute_pbc_rmsd(template.positions, tmpl_pos_init, ts.dimensions))
+        if len(monomers) > 0:
+            d = np.linalg.norm(template.positions[:, np.newaxis, :] -
+                               monomers.positions[np.newaxis, :, :], axis=2)
+            contacts.append(int(np.sum(d.min(axis=0) < 6.0)))
+    if not rmsds:
+        return {"error": "Empty trajectory", "rebound": False}
+
+    n = len(rmsds)
+    final_rmsd = rmsds[-1]
+    q4 = rmsds[3 * n // 4:] if n >= 4 else rmsds          # equilibrium tail (BIO)
+    q4_mean = float(np.mean(q4))
+    q4_std = float(np.std(q4)) if len(q4) > 1 else 0.0
+    q1_mean = float(np.mean(rmsds[:n // 4])) if n >= 4 else q4_mean
+    drift = q4_mean - q1_mean                              # Q1→Q4 convergence
+    converged = abs(drift) <= 1.5
+    residence = sum(1 for r in rmsds if r <= VIP_REMOVAL_THRESHOLD) / n
+    rebound = q4_mean < VIP_RMSD_THRESHOLD
+    out = {
+        "final_rmsd_A": round(float(final_rmsd), 2),
+        "mean_rmsd_A": round(float(np.mean(rmsds)), 2),
+        "q4_rmsd_A": round(q4_mean, 2),
+        "q4_std_A": round(q4_std, 2),
+        "drift_A": round(drift, 2),
+        "converged": bool(converged),
+        "residence": round(residence, 3),
+        "rebound": bool(rebound),
+    }
+    if contacts:
+        out["mean_contacts"] = round(float(np.mean(contacts)), 1)
+        out["final_contacts"] = contacts[-1]
+    # MM-GBSA ΔG over the equilibrium tail (Kumar 2024). Never raises.
+    if (VIP_MMPBSA if with_mmpbsa is None else with_mmpbsa):
+        try:
+            from .utils_gromacs import run_mmpbsa
+            mp = run_mmpbsa(rebind_dir, interval=MMPBSA_INTERVAL, igb=MMPBSA_IGB)
+            if mp.get("dG_bind_kcal") is not None:
+                out["mmpbsa_dG"] = mp["dG_bind_kcal"]
+        except Exception:
+            pass
+    _c = "" if converged else f" ⚠non-converged(drift={drift:+.1f}Å)"
+    _dg = f", ΔG={out['mmpbsa_dG']}" if "mmpbsa_dG" in out else ""
+    logger.info(f"    Rebind [{label}]: Q4={q4_mean:.1f}Å, final={final_rmsd:.1f}Å, "
+                f"residence={residence:.2f}, rebound={rebound}{_dg}{_c}")
+    return out
+
+
+def _run_rebinding_once(rebind_dir, snap_dir, tmpl_indices, tmpl_pos_init, label, seed):
+    """One rebinding replicate: displace template, EM, production MD, analyze."""
+    rebind_dir, snap_dir = Path(rebind_dir), Path(snap_dir)
+    rebind_dir.mkdir(parents=True, exist_ok=True)
+    try:
         shutil.copy2(str(snap_dir / "frame.gro"), str(rebind_dir / "conf.gro"))
         shutil.copy2(str(snap_dir / "topol.top"), str(rebind_dir / "topol.top"))
         for f in snap_dir.glob("*.itp"):
             shutil.copy2(str(f), str(rebind_dir / f.name))
-
-        # Displace template by ~5Å — unique direction per snapshot
-        _displace_template_in_gro(
-            rebind_dir / "conf.gro", tmpl_indices,
-            displacement_nm=0.5, seed=42 + snapshot_idx)
-
-        # EM + short NVT equilibration to relax steric clashes
+        _displace_template_in_gro(rebind_dir / "conf.gro", tmpl_indices,
+                                  displacement_nm=0.5, seed=seed)
         try:
             eq_conf = _run_em_equilibration(rebind_dir)
         except Exception:
             eq_conf = "conf.gro"
-
         dt = 0.002
         nsteps = int(VIP_REBINDING_NS * 1e6 / (dt * 1000))
-        mdp = MDP_PRODUCTION.format(
-            nsteps=nsteps, dt=dt, nstxout=5000, temperature=TEMPERATURE
-        )
+        mdp = MDP_PRODUCTION.format(nsteps=nsteps, dt=dt, nstxout=5000,
+                                    temperature=TEMPERATURE)
         mdp = mdp.replace("continuation = yes", "continuation = no")
         mdp += f"\ngen-vel     = yes\ngen-temp    = {TEMPERATURE}\n"
         mdp += "define = -DPOSRES_MONOMER\n"
         (rebind_dir / "md.mdp").write_text(mdp)
-
-        gmx(["grompp", "-f", "md.mdp", "-c", eq_conf,
-             "-p", "topol.top", "-o", "md.tpr", "-maxwarn", "10"],
-            rebind_dir)
-        gmx(["mdrun", "-deffnm", "md", "-nb", "gpu"],
-            rebind_dir, timeout=int(VIP_REBINDING_NS * 300))
-
-        # Analyze RMSD + contact count from initial position (PBC-aware)
-        traj = rebind_dir / "md.xtc"
-        if traj.exists():
-            u = mda.Universe(str(rebind_dir / eq_conf), str(traj))
-            template = u.select_atoms(f"index {' '.join(str(i) for i in tmpl_indices)}")
-            monomers = u.select_atoms(
-                f"not resname SOL NA CL Na+ Cl- and not index {' '.join(str(i) for i in tmpl_indices)}")
-
-            rmsds = []
-            contacts = []
-            for ts in u.trajectory:
-                rmsd = _compute_pbc_rmsd(
-                    template.positions, tmpl_pos_init, ts.dimensions)
-                rmsds.append(rmsd)
-                # Contact count: monomer atoms within 6Å of template
-                if len(monomers) > 0:
-                    dists = np.linalg.norm(
-                        template.positions[:, np.newaxis, :] -
-                        monomers.positions[np.newaxis, :, :], axis=2)
-                    n_contact = int(np.sum(dists.min(axis=0) < 6.0))
-                    contacts.append(n_contact)
-
-            final_rmsd = rmsds[-1] if rmsds else 999.0
-            n = len(rmsds)
-            # Q4 equilibrium (last 25%) — robust to slow binding/unbinding
-            # kinetics (BIO phase5); uses the equilibrated tail, not one noisy frame.
-            q4 = rmsds[3 * n // 4:] if n >= 4 else rmsds
-            q4_mean = float(np.mean(q4)) if q4 else 999.0
-            q4_std = float(np.std(q4)) if len(q4) > 1 else 0.0
-            # Q1→Q4 drift convergence diagnostic: |drift|>1.5Å ⇒ not equilibrated,
-            # so a non-rebinding verdict may be sampling-limited (run longer).
-            q1_mean = float(np.mean(rmsds[:n // 4])) if n >= 4 else q4_mean
-            drift = q4_mean - q1_mean
-            converged = abs(drift) <= 1.5
-            # Residence: fraction of frames the template stayed within the cavity
-            # (≤ removal threshold). Discriminates "lingered then left" from "left
-            # immediately" even when nothing formally rebinds — key for weak binders.
-            residence = (sum(1 for r in rmsds if r <= VIP_REMOVAL_THRESHOLD) / n
-                         if n else 0.0)
-            # rebound from the Q4 equilibrium mean (not the single final frame)
-            rebound = q4_mean < VIP_RMSD_THRESHOLD
-
-            contact_info = {}
-            if contacts:
-                contact_info = {
-                    "mean_contacts": round(float(np.mean(contacts)), 1),
-                    "final_contacts": contacts[-1] if contacts else 0,
-                }
-
-            _conv = "" if converged else f" ⚠non-converged(drift={drift:+.1f}Å)"
-            logger.info(f"    Rebind [{label}]: Q4={q4_mean:.1f}Å, final={final_rmsd:.1f}Å, "
-                        f"residence={residence:.2f}, rebound={rebound}{_conv}")
-            return {
-                "final_rmsd_A": round(float(final_rmsd), 2),
-                "mean_rmsd_A": round(float(np.mean(rmsds)), 2),
-                "q4_rmsd_A": round(q4_mean, 2),
-                "q4_std_A": round(q4_std, 2),
-                "drift_A": round(drift, 2),
-                "converged": bool(converged),
-                "residence": round(residence, 3),
-                "rebound": bool(rebound),
-                **contact_info,
-            }
-
-        return {"error": "Trajectory not generated", "rebound": False}
-
+        gmx(["grompp", "-f", "md.mdp", "-c", eq_conf, "-p", "topol.top",
+             "-o", "md.tpr", "-maxwarn", "50"], rebind_dir)
+        gmx(["mdrun", "-deffnm", "md", "-nb", "gpu"], rebind_dir,
+            timeout=int(VIP_REBINDING_NS * 300))
+        return _analyze_rebind_traj(rebind_dir, eq_conf, tmpl_indices,
+                                    tmpl_pos_init, label)
     except Exception as e:
         logger.error(f"    Rebinding failed: {e}")
         return {"error": str(e), "rebound": False}
+
+
+def _ensemble_rebind(reps):
+    """Ensemble-average multi-restart replicate metrics (majority vote for the
+    boolean flags, mean ± spread for the continuous ones)."""
+    reps = [r for r in reps if isinstance(r, dict) and "error" not in r]
+    if not reps:
+        return {"error": "all replicates failed", "rebound": False}
+    if len(reps) == 1:
+        return reps[0]
+
+    def _m(k):
+        vals = [r[k] for r in reps if r.get(k) is not None]
+        return round(float(np.mean(vals)), 3) if vals else None
+    agg = {
+        "q4_rmsd_A": _m("q4_rmsd_A"),
+        "q4_ensemble_std_A": round(float(np.std(
+            [r["q4_rmsd_A"] for r in reps if r.get("q4_rmsd_A") is not None])), 2),
+        "final_rmsd_A": _m("final_rmsd_A"),
+        "mean_rmsd_A": _m("mean_rmsd_A"),
+        "drift_A": _m("drift_A"),
+        "residence": _m("residence"),
+        "converged": sum(1 for r in reps if r.get("converged")) >= (len(reps) + 1) // 2,
+        "rebound": sum(1 for r in reps if r.get("rebound")) >= (len(reps) + 1) // 2,
+        "n_replicates": len(reps),
+    }
+    if any("mmpbsa_dG" in r for r in reps):
+        agg["mmpbsa_dG"] = _m("mmpbsa_dG")
+    if any("mean_contacts" in r for r in reps):
+        agg["mean_contacts"] = _m("mean_contacts")
+    logger.info(f"    Ensemble(n={len(reps)}): Q4={agg['q4_rmsd_A']}±"
+                f"{agg['q4_ensemble_std_A']}Å residence={agg['residence']} "
+                f"rebound={agg['rebound']}")
+    return agg
+
+
+def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label, snapshot_idx=0):
+    """Rebinding with optional multi-restart ensemble (VIP_N_RESTARTS). Each
+    replicate perturbs the initial displacement (different seed); continuous
+    metrics are ensemble-averaged with the spread reported."""
+    snap_dir = Path(snap_dir)
+    n_rep = max(1, int(VIP_N_RESTARTS))
+    base = snap_dir / f"rebind_{label}"
+    reps = [_run_rebinding_once(base if n_rep == 1 else base / f"rep_{rep}",
+                                snap_dir, tmpl_indices, tmpl_pos_init, label,
+                                seed=42 + snapshot_idx + rep * 1000)
+            for rep in range(n_rep)]
+    return _ensemble_rebind(reps)
 
 
 def _displace_template_in_gro(gro_path, tmpl_indices, displacement_nm=0.5,
@@ -586,6 +628,7 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
     # SI > 1.5 → selective, SI 1.0-1.5 → weak, SI < 1.0 → non-selective
     own_rmsds = []
     own_residences = []
+    own_dgs = []
     n_conv = n_conv_total = 0
     interf_rmsds_all = {name: [] for name in interferent_names}
     for snap in snapshots:
@@ -598,6 +641,8 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
             own_rmsds.append(own_r)
         if rt.get("residence") is not None:
             own_residences.append(rt["residence"])
+        if rt.get("mmpbsa_dG") is not None:
+            own_dgs.append(rt["mmpbsa_dG"])
         if rt.get("converged") is not None:
             n_conv_total += 1
             n_conv += 1 if rt["converged"] else 0
@@ -665,6 +710,7 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
         "retention": round(retention, 3),
         "retention_quality": retention_quality,
         "residence": round(residence_mean, 3),
+        "mmpbsa_dG_mean": round(float(np.mean(own_dgs)), 2) if own_dgs else None,
         "converged": converged,
         "selectivity_score": round(sel_score, 2),
         "selectivity_index": round(selectivity_index, 3),
@@ -678,6 +724,112 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
             for name, cnt in interf_rebound.items()
         },
     }
+
+
+def _snapshot_template_ref(snap_dir):
+    """Reconstruct (tmpl_indices, tmpl_pos_init) from a snapshot's frame.gro —
+    the SAME template identification the live run uses (first non-solvent resid).
+    Lets reanalyze/extend recompute RMSD without the original in-memory state."""
+    import MDAnalysis as mda
+    ref = Path(snap_dir) / "frame.gro"
+    if not ref.exists():
+        return None, None
+    try:
+        u = mda.Universe(str(ref))
+        non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+        frid = non_sol.residues[0].resid
+        template = u.select_atoms(f"resid {frid}")
+        return list(template.indices), template.positions.copy()
+    except Exception:
+        return None, None
+
+
+def reanalyze_vip(output_dir=None):
+    """Re-derive VIP metrics (Q4/drift/residence/retention/ΔG) from EXISTING
+    rebinding trajectories — NO MD re-run — and rewrite stage6_vip.json. Applies
+    the current metric definitions to an old run. (BIO reanalyze_phase5.)"""
+    if output_dir is None:
+        output_dir = OUTPUT_DIRS.get("stage6", f"{OUTPUT_DIR}/stage6")
+    out = Path(output_dir)
+    interferent_names = list(INTERFERENT_LIBRARY.keys())
+    monomer_dirs = sorted(d for d in out.iterdir()
+                          if d.is_dir() and (d / "snapshot_0").exists())
+    logger.info(f"Reanalyze VIP: {len(monomer_dirs)} monomer(s) in {out}")
+    results = {}
+    for mdir in monomer_dirs:
+        mono = mdir.name
+        snapshot_results = []
+        for snap_dir in sorted(mdir.glob("snapshot_*")):
+            tmpl_indices, tmpl_pos = _snapshot_template_ref(snap_dir)
+            if tmpl_indices is None:
+                continue
+            snap = {"success": True, "removal": {}}
+            base = snap_dir / "rebind_template"
+            reps = sorted(base.glob("rep_*"))
+            if reps:
+                snap["rebind_template"] = _ensemble_rebind([
+                    _analyze_rebind_traj(rp, "conf.gro", tmpl_indices, tmpl_pos, "template")
+                    for rp in reps])
+            elif base.exists():
+                snap["rebind_template"] = _analyze_rebind_traj(
+                    base, "conf.gro", tmpl_indices, tmpl_pos, "template")
+            else:
+                continue
+            for iname in interferent_names:
+                idir = snap_dir / f"rebind_{iname}"
+                if idir.exists():
+                    snap[f"rebind_{iname}"] = _analyze_rebind_traj(
+                        idir, "conf.gro", tmpl_indices, tmpl_pos, iname)
+            snapshot_results.append(snap)
+        if snapshot_results:
+            results[mono] = _analyze_results(mono, snapshot_results, interferent_names)
+            r = results[mono]
+            logger.info(f"  {mono}: vip_score={r.get('vip_score')} "
+                        f"retention={r.get('retention')} residence={r.get('residence')} "
+                        f"ΔG={r.get('mmpbsa_dG_mean')}")
+    with open(out / "stage6_vip.json", "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    logger.info(f"Reanalyze VIP: wrote stage6_vip.json ({len(results)} monomers)")
+    _print_summary(results)
+    return results
+
+
+def extend_drifting_vip(output_dir=None, extend_ns=None, drift_threshold=1.5):
+    """Extend NON-CONVERGED rebinding MDs (|Q1→Q4 drift| > threshold) by
+    extend_ns, continuing from the checkpoint (gmx convert-tpr -extend + mdrun
+    -cpi), then reanalyze. Focuses extra sampling on only the runs that need it.
+    (BIO extend_drifting_mds.)"""
+    if output_dir is None:
+        output_dir = OUTPUT_DIRS.get("stage6", f"{OUTPUT_DIR}/stage6")
+    out = Path(output_dir)
+    extend_ns = int(extend_ns if extend_ns is not None else VIP_EXTEND_NS)
+    n_ext = 0
+    for mdir in sorted(d for d in out.iterdir() if d.is_dir()):
+        for base in sorted(mdir.glob("snapshot_*/rebind_template")):
+            snap_dir = base.parent
+            tmpl_indices, tmpl_pos = _snapshot_template_ref(snap_dir)
+            if tmpl_indices is None:
+                continue
+            run_dirs = sorted(base.glob("rep_*")) or [base]
+            for rd in run_dirs:
+                if not (rd / "md.tpr").exists() or not (rd / "md.cpt").exists():
+                    continue
+                m = _analyze_rebind_traj(rd, "conf.gro", tmpl_indices, tmpl_pos,
+                                         "template", with_mmpbsa=False)
+                if m.get("converged", True) or abs(m.get("drift_A", 0)) <= drift_threshold:
+                    continue
+                logger.info(f"  Extending {rd} by {extend_ns} ns "
+                            f"(drift={m.get('drift_A')}Å)")
+                try:
+                    gmx(["convert-tpr", "-s", "md.tpr",
+                         "-extend", str(extend_ns * 1000), "-o", "md.tpr"], rd)
+                    gmx(["mdrun", "-deffnm", "md", "-cpi", "md.cpt", "-nb", "gpu"],
+                        rd, timeout=int(extend_ns * 300))
+                    n_ext += 1
+                except Exception as e:
+                    logger.warning(f"    extend failed: {e}")
+    logger.info(f"Extend VIP: extended {n_ext} non-converged run(s); reanalyzing")
+    return reanalyze_vip(output_dir)
 
 
 def _print_summary(all_results):

@@ -79,6 +79,17 @@ def parse_args():
         "--report", action="store_true",
         help="Generate HTML report from existing results"
     )
+    # VIP extras (BIO phase5)
+    parser.add_argument(
+        "--reanalyze-vip", action="store_true",
+        help="Re-derive VIP metrics (Q4/residence/retention/ΔG) from EXISTING "
+             "Stage-6 trajectories without re-running MD, then rewrite stage6_vip.json."
+    )
+    parser.add_argument(
+        "--extend-vip", action="store_true",
+        help="Extend non-converged Stage-6 rebinding MDs (VIP_EXTEND_NS) from "
+             "checkpoint, then reanalyze."
+    )
     # Feature 7: Interferent suggestion
     parser.add_argument(
         "--suggest-interferents", action="store_true",
@@ -313,6 +324,16 @@ def main():
     template = args.template or TEMPLATE_SMILES
 
     # ── Feature-only modes ───────────────────────────────────────────
+    if args.reanalyze_vip:
+        from .stage6_vip import reanalyze_vip
+        reanalyze_vip(output_dir=_stage_dir(out_dir, "stage6"))
+        return
+
+    if args.extend_vip:
+        from .stage6_vip import extend_drifting_vip
+        extend_drifting_vip(output_dir=_stage_dir(out_dir, "stage6"))
+        return
+
     if args.crosslinker:
         from .crosslinker import run_crosslinker_screening
         run_crosslinker_screening(template_smiles=template,

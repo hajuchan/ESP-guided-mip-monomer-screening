@@ -245,6 +245,10 @@ VIP_REMOVAL_NS = 10             # Template removal test (ns)
 VIP_REBINDING_NS = 50
 VIP_RMSD_THRESHOLD = 5.0        # Å, rebinding success
 VIP_REMOVAL_THRESHOLD = 8.0     # Å, template escaped (removal OK)
+# ── VIP extras (BIO phase5) ──
+VIP_N_RESTARTS = 1              # multi-restart replicates per snapshot (BIO: 3); 1 = off
+VIP_MMPBSA = False              # MM-GBSA ΔG per rebinding (needs gmx_MMPBSA + mpi4py)
+VIP_EXTEND_NS = 50              # ns to extend non-converged rebinding MDs (--extend-vip)
 
 # Feature 4: ESP 맵 시각화
 USE_ESP_MAP = True  # True면 Stage 2에서 ESP 맵 생성
