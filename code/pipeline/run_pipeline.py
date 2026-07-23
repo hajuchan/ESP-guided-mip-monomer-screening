@@ -48,6 +48,12 @@ def parse_args():
         help="Template SMILES string (default: from config.py)"
     )
     parser.add_argument(
+        "--all-templates", action="store_true",
+        help="Run the whole pipeline for EVERY target in config.TEMPLATES, "
+             "each in its own subprocess → results/<TEMPLATE_NAME>/. "
+             "Respects --stage; do not combine with --output-dir."
+    )
+    parser.add_argument(
         "--stage", type=str, default="all",
         choices=["1", "2", "3", "4", "5", "6", "7", "all"],
         help="Which stage to run (default: all)"
@@ -258,6 +264,30 @@ def print_summary(output_dir: str):
 
 def main():
     args = parse_args()
+
+    # ── Multi-target driver ──────────────────────────────────────────
+    # Run the full pipeline for every entry in config.TEMPLATES, each in its own
+    # subprocess. Subprocess isolation is required because TEMPLATE_NAME/SMILES
+    # are module-level config constants imported across the codebase — a fresh
+    # process re-imports config with MIP_TEMPLATE set to the right target.
+    if args.all_templates:
+        import os as _os
+        import subprocess as _sp
+        from .config import TEMPLATES
+        passthrough = [a for a in sys.argv[1:] if a != "--all-templates"]
+        summary = {}
+        for name in TEMPLATES:
+            print("\n" + "█" * 60)
+            print(f"█  TARGET: {name}  → results/{name.replace(' ', '_')}/")
+            print("█" * 60, flush=True)
+            env = {**_os.environ, "MIP_TEMPLATE": name}
+            proc = _sp.run([sys.executable, _os.path.abspath(__file__)] + passthrough,
+                           env=env)
+            summary[name] = proc.returncode
+        print("\n=== Multi-target summary ===")
+        for name, code in summary.items():
+            print(f"  {name:20s} {'OK' if code == 0 else f'FAILED (rc={code})'}")
+        sys.exit(0 if all(c == 0 for c in summary.values()) else 1)
 
     # Default output dir = <results>/<TEMPLATE_NAME>, with stage1..stage7 nested.
     if args.output_dir:

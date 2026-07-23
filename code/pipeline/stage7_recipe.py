@@ -29,13 +29,13 @@ logger = logging.getLogger(__name__)
 # (vinyl) network cannot incorporate a silane sol-gel crosslinker and vice-versa.
 _CHEM_TO_XL_POLY = {"free-radical": "vinyl", "sol-gel": "silane", "oxidative": None}
 _CHEM_DEFAULT_XL = {"free-radical": "EGDMA", "sol-gel": "TEOS", "oxidative": None}
+# monomer polymerization type each protocol chemistry requires
+_CHEM_TO_MONO_POLY = {"free-radical": "vinyl", "sol-gel": "silane", "oxidative": "oxidative"}
 
 
-def _xl_polymerization(name):
-    """Classify a crosslinker's polymerization chemistry from its SMILES,
-    mirroring stage4_mmsd._detect_polymerization (Si→silane, non-aromatic
-    C=C→vinyl, else oxidative)."""
-    smi = CROSSLINKER_LIBRARY.get(name, "")
+def _classify_polymerization(smi):
+    """Si→silane, non-aromatic C=C→vinyl, else oxidative
+    (mirrors stage4_mmsd._detect_polymerization)."""
     if not smi:
         return "unknown"
     try:
@@ -52,35 +52,59 @@ def _xl_polymerization(name):
         return "unknown"
 
 
-def _select_crosslinker(base, chemistry, mmsd_xl):
-    """Pick a crosslinker whose chemistry matches the winning polymerization
-    route. Priority:
-      1. the crosslinker MMSD co-selected with the combo (matched by construction);
-      2. the Stage-3 screening recommendation, IF compatible;
-      3. the weakest-binding COMPATIBLE crosslinker from the full screening;
-      4. a sensible per-chemistry default.
+def _xl_polymerization(name):
+    return _classify_polymerization(CROSSLINKER_LIBRARY.get(name, ""))
+
+
+def _mono_polymerization(name):
+    return _classify_polymerization(MONOMER_LIBRARY.get(name, ""))
+
+
+def _dft_bindings(base, solvent):
+    """{monomer: template binding ΔE (kcal/mol) in the porogen} from Stage 2 DFT.
+    Falls back to a monomer's mean over solvents when the porogen entry is
+    missing. Used to weight the MD ranking by real affinity so a non-binder that
+    merely lingers near the template (high contact frequency, ~0 DFT binding)
+    cannot outrank a genuine strong binder."""
+    out = {}
+    p = base / "stage2" / "stage2_dft.json"
+    if not p.exists():
+        return out
+    try:
+        s2 = json.load(open(p))
+    except Exception:
+        return out
+    for m, solvs in (s2.items() if isinstance(s2, dict) else []):
+        if not isinstance(solvs, dict):
+            continue
+        v = solvs.get(solvent)
+        be = v.get("bsse_dE") if isinstance(v, dict) else None
+        if be is None:
+            vals = [x.get("bsse_dE") for x in solvs.values()
+                    if isinstance(x, dict) and x.get("bsse_dE") is not None]
+            be = sum(vals) / len(vals) if vals else None
+        if be is not None:
+            out[m] = float(be)
+    return out
+
+
+def _select_crosslinker(base, chemistry, mmsd_xl=None):
+    """Pick the most INERT crosslinker compatible with the winning chemistry.
+
+    A crosslinker is used in large excess (~80 %, T:XL ≈ 1:20); if it binds the
+    template it seeds NON-SPECIFIC sites throughout the whole matrix (not just
+    the imprinted cavity), raising NIP binding and LOWERING the imprinting factor
+    (Shoravi/Olsson 2014). So the correct criterion is the WEAKEST template
+    binding among chemistry-compatible crosslinkers — deliberately NOT MMSD's
+    pick, whose total-binding optimisation rewards a strongly-binding crosslinker
+    (exactly the wrong thing). EGDMA is the textbook inert free-radical choice.
     Oxidative polymers self-crosslink → returns (None, reason)."""
     need = _CHEM_TO_XL_POLY.get(chemistry, "vinyl")
     if need is None:                       # oxidative → no molecular crosslinker
         return None, "oxidative self-crosslinking (no molecular crosslinker)"
 
-    # 1) MMSD's own choice (already chemistry-matched with the combo)
-    if mmsd_xl and _xl_polymerization(mmsd_xl) == need:
-        return mmsd_xl, "MMSD combo (chemistry-matched)"
-
-    # 2) Stage-3 recommendation, only if compatible with the winning chemistry
-    rec = None
-    cl_path = base / "stage3" / "stage3_crosslinker.json"
-    if cl_path.exists():
-        try:
-            rec = json.load(open(cl_path)).get("recommended")
-        except Exception:
-            rec = None
-    if rec and _xl_polymerization(rec) == need:
-        return rec, "Stage 3 screening (compatible)"
-
-    # 3) weakest-binding COMPATIBLE crosslinker from the full screening
-    #    (least-negative avg dE = least template competition, chemistry-filtered)
+    # 1) most inert COMPATIBLE crosslinker from the full DFT screening
+    #    (least-negative avg ΔE = least template competition = fewest non-specific sites)
     feat = base / "features" / "crosslinker.json"
     if feat.exists():
         try:
@@ -95,15 +119,26 @@ def _select_crosslinker(base, chemistry, mmsd_xl):
                 if not bes:
                     continue
                 avg = sum(bes) / len(bes)
-                if avg > best_be:
+                if avg > best_be:           # weakest (least negative) wins
                     best_be, best = avg, name
             if best:
-                return best, "weakest-binding compatible (Stage 3 full screening)"
+                return best, (f"most inert compatible — weakest template binding "
+                              f"(avg ΔE={best_be:+.3f} kcal/mol) minimises non-specific sites")
         except Exception:
             pass
 
-    # 4) per-chemistry default
-    return _CHEM_DEFAULT_XL.get(chemistry, "EGDMA"), "per-chemistry default"
+    # 2) Stage-3 recommendation (also weakest-binding based), if compatible
+    cl_path = base / "stage3" / "stage3_crosslinker.json"
+    if cl_path.exists():
+        try:
+            rec = json.load(open(cl_path)).get("recommended")
+            if rec and _xl_polymerization(rec) == need:
+                return rec, "Stage 3 screening (weakest-binding, compatible)"
+        except Exception:
+            pass
+
+    # 3) per-chemistry default (standard inert crosslinker)
+    return _CHEM_DEFAULT_XL.get(chemistry, "EGDMA"), "per-chemistry default (standard inert crosslinker)"
 
 
 def run_stage7(output_dir: str = None) -> dict:
@@ -149,10 +184,27 @@ def run_stage7(output_dir: str = None) -> dict:
     if not monomer_ranking and s4_path.exists():
         s4 = json.load(open(s4_path))
         if isinstance(s4, list):
-            ranked = [(r["monomer"], r.get("contact_frequency", 0))
-                      for r in s4 if r.get("contact_frequency", 0) > 0]
+            # Rank by binding-weighted contact = |DFT ΔE| × contact_freq. Raw
+            # contact frequency alone (sparse frames, values clustered) can rank
+            # a DFT non-binder that merely lingers (e.g. VIM: contact 0.44 but
+            # DFT −0.14) above a genuine strong binder (NVP: −6.9). Weighting by
+            # DFT affinity keeps the MD validation but demands real binding.
+            dft_be = _dft_bindings(base, solvent)
+            ranked = []
+            for r in s4:
+                m, cf = r.get("monomer"), r.get("contact_frequency", 0)
+                if not m or cf <= 0:
+                    continue
+                affinity = max(0.0, -dft_be.get(m, 0.0))  # attractive ΔE only
+                ranked.append((m, round(affinity * cf, 4)))
             ranked.sort(key=lambda x: -x[1])
-            if ranked:
+            if any(s > 0 for _, s in ranked):
+                monomer_ranking = ranked
+                src = "Stage 5 MD contact × DFT affinity"
+            elif ranked:  # no DFT data → fall back to raw contact frequency
+                ranked = sorted(((r["monomer"], r.get("contact_frequency", 0))
+                                 for r in s4 if r.get("contact_frequency", 0) > 0),
+                                key=lambda x: -x[1])
                 monomer_ranking, src = ranked, "Stage 5 MD (contact frequency)"
     if not monomer_ranking:
         s3_path = base / "stage3" / "stage3_top.json"
@@ -166,7 +218,41 @@ def run_stage7(output_dir: str = None) -> dict:
         logger.warning("No monomer ranking data found")
         return {"error": "No results to generate recipe"}
 
-    # Top 3 monomers
+    # ── Polymerization chemistry (winning MMSD combo) ──
+    # Determined BEFORE monomer selection so the whole recipe (monomer +
+    # protocol + crosslinker) is ONE self-consistent chemistry. Otherwise the
+    # MD contact-frequency ranking can surface e.g. pyrrole (oxidative) as the
+    # top binder while the protocol stays free-radical → a chemically impossible
+    # recipe (pyrrole + AIBN).
+    chemistry = "free-radical"
+    mmsd_xl = None
+    mmsd_path = base / "stage4" / "mmsd_results.json"
+    if mmsd_path.exists():
+        try:
+            _t = (json.load(open(mmsd_path)).get("top_pcs") or [])
+            if _t:
+                chemistry = _t[0].get("synthesis_method") or "free-radical"
+                mmsd_xl = _t[0].get("crosslinker")
+        except Exception:
+            pass
+
+    # Keep only monomers whose polymerization matches the winning chemistry, so
+    # best_monomer agrees with the protocol and crosslinker.
+    _need_poly = _CHEM_TO_MONO_POLY.get(chemistry)
+    if _need_poly:
+        _consistent = [(m, s) for (m, s) in monomer_ranking
+                       if _mono_polymerization(m) == _need_poly]
+        if _consistent:
+            n_drop = len(monomer_ranking) - len(_consistent)
+            if n_drop:
+                recipe["ranking_note"] = (
+                    f"filtered to {_need_poly} monomers for consistency with the "
+                    f"{chemistry} protocol ({n_drop} incompatible dropped)")
+                logger.info(f"  Ranking filtered to {_need_poly}: "
+                            f"{n_drop} chemistry-incompatible monomers dropped")
+            monomer_ranking = _consistent
+
+    # Top 3 monomers (chemistry-consistent)
     top3 = monomer_ranking[:3]
     recipe["top3_monomers"] = [
         {"rank": i+1, "name": m, "score": round(s, 3),
@@ -174,19 +260,6 @@ def run_stage7(output_dir: str = None) -> dict:
         for i, (m, s) in enumerate(top3)
     ]
 
-    # ── Polymerization chemistry (winning MMSD combo) ──
-    # Determined here so the crosslinker can be kept chemically compatible.
-    chemistry = "free-radical"
-    mmsd_xl = None
-    mmsd_path = base / "stage4" / "mmsd_results.json"
-    if mmsd_path.exists():
-        try:
-            _top = (json.load(open(mmsd_path)).get("top_pcs") or [])
-            if _top:
-                chemistry = _top[0].get("synthesis_method") or "free-radical"
-                mmsd_xl = _top[0].get("crosslinker")
-        except Exception:
-            pass
     recipe["polymerization"] = chemistry
 
     # ── Cross-linker (must match the polymerization chemistry) ──
@@ -299,23 +372,25 @@ def run_stage7(output_dir: str = None) -> dict:
         except Exception:
             pass
 
-    # GAP 5: crosslinker is an ACTIVE template-binding species, not inert filler
-    # (Shoravi/Olsson IJMS 2014 — EGDMA often binds the template more than the FM).
-    _mmsd_p = base / "stage4" / "mmsd_results.json"
-    if _mmsd_p.exists():
+    # GAP 5: verify the SELECTED crosslinker is actually inert. We now pick the
+    # weakest-binding compatible crosslinker, so this should CONFIRM it does not
+    # compete with the monomer (Shoravi/Olsson 2014). Compares the recipe's
+    # crosslinker DFT binding (in the porogen) with the best monomer's.
+    if xl:
         try:
-            _pc = (json.load(open(_mmsd_p)).get("top_pcs") or [{}])[0]
-            _me = _pc.get("monomer_energies") or {}
-            _xl = _pc.get("crosslinker")
-            _xl_be = _me.get(_xl)
-            _fm_bes = [_me[m] for m in (_pc.get("functional_monomers") or [])
-                       if m in _me]
-            if _xl_be is not None and _fm_bes:
+            _feat = json.load(open(base / "features" / "crosslinker.json"))
+            _xls = _feat.get(xl, {}) or {}
+            _xl_be = (_xls.get(solvent, {}) or {}).get("bsse_dE")
+            if _xl_be is None:
+                _vals = [v.get("bsse_dE") for v in _xls.values()
+                         if isinstance(v, dict) and v.get("bsse_dE") is not None]
+                _xl_be = sum(_vals) / len(_vals) if _vals else None
+            if _xl_be is not None and best_be is not None:
                 recipe["crosslinker_binding"] = {
-                    "crosslinker": _xl,
-                    "xl_template_kcal": _xl_be,
-                    "strongest_monomer_kcal": min(_fm_bes),
-                    "xl_dominates": _xl_be <= min(_fm_bes),
+                    "crosslinker": xl,
+                    "xl_template_kcal": round(_xl_be, 3),
+                    "best_monomer_kcal": round(best_be, 3),
+                    "xl_dominates": _xl_be <= best_be,
                 }
         except Exception:
             pass
@@ -415,15 +490,19 @@ Protocol (free-radical polymerization):
     _xlb = recipe.get("crosslinker_binding") or {}
     if _xlb:
         _msg = (f"crosslinker {_xlb.get('crosslinker')} binds the template "
-                f"{_xlb.get('xl_template_kcal')} kcal/mol vs strongest monomer "
-                f"{_xlb.get('strongest_monomer_kcal')}")
+                f"{_xlb.get('xl_template_kcal')} kcal/mol vs best monomer "
+                f"{_xlb.get('best_monomer_kcal')}")
         if _xlb.get("xl_dominates"):
             notes.append(
                 f"  - ⚠ Cross-linker is an active recognition species: {_msg} — "
-                f"it DOMINATES template binding; cross-linker choice co-determines "
-                f"selectivity (Shoravi/Olsson 2014). Consider screening EGDMA vs TRIM.")
+                f"it competes with/dominates the monomer; a strongly-binding "
+                f"crosslinker seeds non-specific sites and lowers IF "
+                f"(Shoravi/Olsson 2014).")
         else:
-            notes.append(f"  - Cross-linker binding accounted for: {_msg}.")
+            notes.append(
+                f"  - Cross-linker is inert (as intended): {_msg} — it binds the "
+                f"template far more weakly than the monomer, so it contributes "
+                f"structure without seeding non-specific sites (Shoravi/Olsson 2014).")
 
     protocol = header + steps + f"""
 

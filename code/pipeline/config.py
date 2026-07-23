@@ -14,8 +14,17 @@ TEMPLATES = {
 }
 # Active target for THIS run. Stage modules do `from .config import
 # TEMPLATE_SMILES / TEMPLATE_NAME`, so these two names must exist.
-# To screen another target, change the key below (or pass --template SMILES).
-TEMPLATE_NAME = "Gamma-terpinene"
+# To screen another target: change _DEFAULT_TEMPLATE below, pass --template
+# SMILES, or set env MIP_TEMPLATE="<name>". The env override lets the
+# multi-target driver (run_pipeline --all-templates) run each target in its own
+# subprocess so config re-imports the right names cleanly per target.
+import os as _os
+_DEFAULT_TEMPLATE = "Gamma-terpinene"
+TEMPLATE_NAME = _os.environ.get("MIP_TEMPLATE", _DEFAULT_TEMPLATE)
+if TEMPLATE_NAME not in TEMPLATES:
+    raise ValueError(
+        f"MIP_TEMPLATE={TEMPLATE_NAME!r} is not a key of TEMPLATES "
+        f"{list(TEMPLATES)}")
 TEMPLATE_SMILES = TEMPLATES[TEMPLATE_NAME]
 
 # ── Monomer Library ──────────────────────────────────────────────────
@@ -226,10 +235,14 @@ MD_MULTI_MONOMER = True         # True: include all top monomers in one simulati
 MD_MULTI_MONOMER_TOP_N = 3       # Number of top monomers to include in multi-monomer MD
 
 # ── Stage 6: VIP Parameters ──
-VIP_N_SNAPSHOTS = 5              # Equilibrium snapshots (evenly spaced)
+VIP_N_SNAPSHOTS = 10             # Equilibrium snapshots (BIO: n=10 for stats)
 VIP_RESTRAINT_K = 1000           # kJ/mol/nm² position restraint
 VIP_REMOVAL_NS = 10             # Template removal test (ns)
-VIP_REBINDING_NS = 10           # Rebinding MD (ns)
+# Rebinding MD length (ns). BIO uses 50 ns (extended from 20) so the template
+# reaches equilibrium and the Q4/residence metrics are meaningful. This is the
+# dominant cost: 10 snapshots × 50 ns × (removal+rebinding) per monomer — for a
+# quick trial drop to ~20, or reduce VIP_N_SNAPSHOTS.
+VIP_REBINDING_NS = 50
 VIP_RMSD_THRESHOLD = 5.0        # Å, rebinding success
 VIP_REMOVAL_THRESHOLD = 8.0     # Å, template escaped (removal OK)
 

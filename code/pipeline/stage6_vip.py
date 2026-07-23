@@ -444,9 +444,25 @@ def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label,
                     n_contact = int(np.sum(dists.min(axis=0) < 6.0))
                     contacts.append(n_contact)
 
-            final_rmsd = rmsds[-1] if rmsds else 999
-            mean_rmsd = np.mean(rmsds) if rmsds else 999
-            rebound = final_rmsd < VIP_RMSD_THRESHOLD
+            final_rmsd = rmsds[-1] if rmsds else 999.0
+            n = len(rmsds)
+            # Q4 equilibrium (last 25%) — robust to slow binding/unbinding
+            # kinetics (BIO phase5); uses the equilibrated tail, not one noisy frame.
+            q4 = rmsds[3 * n // 4:] if n >= 4 else rmsds
+            q4_mean = float(np.mean(q4)) if q4 else 999.0
+            q4_std = float(np.std(q4)) if len(q4) > 1 else 0.0
+            # Q1→Q4 drift convergence diagnostic: |drift|>1.5Å ⇒ not equilibrated,
+            # so a non-rebinding verdict may be sampling-limited (run longer).
+            q1_mean = float(np.mean(rmsds[:n // 4])) if n >= 4 else q4_mean
+            drift = q4_mean - q1_mean
+            converged = abs(drift) <= 1.5
+            # Residence: fraction of frames the template stayed within the cavity
+            # (≤ removal threshold). Discriminates "lingered then left" from "left
+            # immediately" even when nothing formally rebinds — key for weak binders.
+            residence = (sum(1 for r in rmsds if r <= VIP_REMOVAL_THRESHOLD) / n
+                         if n else 0.0)
+            # rebound from the Q4 equilibrium mean (not the single final frame)
+            rebound = q4_mean < VIP_RMSD_THRESHOLD
 
             contact_info = {}
             if contacts:
@@ -455,12 +471,17 @@ def _run_rebinding(snap_dir, tmpl_pos_init, tmpl_indices, label,
                     "final_contacts": contacts[-1] if contacts else 0,
                 }
 
-            logger.info(f"    Rebind [{label}]: final={final_rmsd:.1f}Å, "
-                        f"mean={mean_rmsd:.1f}Å, contacts={contact_info.get('mean_contacts', 0):.0f}, "
-                        f"rebound={rebound}")
+            _conv = "" if converged else f" ⚠non-converged(drift={drift:+.1f}Å)"
+            logger.info(f"    Rebind [{label}]: Q4={q4_mean:.1f}Å, final={final_rmsd:.1f}Å, "
+                        f"residence={residence:.2f}, rebound={rebound}{_conv}")
             return {
                 "final_rmsd_A": round(float(final_rmsd), 2),
-                "mean_rmsd_A": round(float(mean_rmsd), 2),
+                "mean_rmsd_A": round(float(np.mean(rmsds)), 2),
+                "q4_rmsd_A": round(q4_mean, 2),
+                "q4_std_A": round(q4_std, 2),
+                "drift_A": round(drift, 2),
+                "converged": bool(converged),
+                "residence": round(residence, 3),
                 "rebound": bool(rebound),
                 **contact_info,
             }
@@ -557,27 +578,32 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
         # Template doesn't rebind → sel = 0
         sel_score = 0.0
 
-    # Score = rebind_rate × (1 + sel_score)
-    # Primary metric: cavity rebinding rate (Zink & Moura 2018).
-    # Falls back to both_rate formula when removal works (large templates).
-    if both_rate > 0:
-        vip_score = both_rate * (1 + sel_score)
-    else:
-        vip_score = rebind_rate * (1 + sel_score)
+    # (vip_score is computed below from a CONTINUOUS retention metric, not the
+    # binary rebind_rate — see the retention block after the RMSD aggregation.)
 
     # ── Selectivity Index (Mohsenzadeh 2024): RMSD-based ──
     # SI = mean(interf_final_rmsd) / mean(template_final_rmsd)
     # SI > 1.5 → selective, SI 1.0-1.5 → weak, SI < 1.0 → non-selective
     own_rmsds = []
+    own_residences = []
+    n_conv = n_conv_total = 0
     interf_rmsds_all = {name: [] for name in interferent_names}
     for snap in snapshots:
         if not snap.get("success"):
             continue
-        own_r = snap.get("rebind_template", {}).get("final_rmsd_A")
+        rt = snap.get("rebind_template", {})
+        # Q4 equilibrium RMSD (BIO); fall back to final_rmsd for old data.
+        own_r = rt.get("q4_rmsd_A", rt.get("final_rmsd_A"))
         if own_r is not None:
             own_rmsds.append(own_r)
+        if rt.get("residence") is not None:
+            own_residences.append(rt["residence"])
+        if rt.get("converged") is not None:
+            n_conv_total += 1
+            n_conv += 1 if rt["converged"] else 0
         for iname in interferent_names:
-            ir = snap.get(f"rebind_{iname}", {}).get("final_rmsd_A")
+            it = snap.get(f"rebind_{iname}", {})
+            ir = it.get("q4_rmsd_A", it.get("final_rmsd_A"))
             if ir is not None:
                 interf_rmsds_all[iname].append(ir)
 
@@ -601,12 +627,45 @@ def _analyze_results(monomer_name, snapshots, interferent_names):
         else:
             p_values[iname] = None
 
+    # ── Continuous retention score (replaces the binary rebind_rate) ──
+    # "rebound if RMSD < 5 Å" is 0 for every weakly-recognised template
+    # (e.g. nonpolar gamma-terpinene), so it cannot rank monomers. Instead grade
+    # RETENTION from the equilibrium template RMSD: 1.0 when the template is held
+    # in the cavity (≤ rebind threshold), decaying to 0 as it escapes (~2× the
+    # removal threshold). A template that lingers at 6 Å now scores well above
+    # one that flies off to 18 Å — a discriminating, non-zero signal.
+    _R_near = float(VIP_RMSD_THRESHOLD)          # Å, fully retained
+    _R_far = 2.0 * float(VIP_REMOVAL_THRESHOLD)  # Å, fully escaped
+    retention = (max(0.0, min(1.0, (_R_far - own_mean) / (_R_far - _R_near)))
+                 if own_rmsds else 0.0)
+    if not own_rmsds:
+        retention_quality = "no_data"
+    elif own_mean <= VIP_RMSD_THRESHOLD:
+        retention_quality = "retained"
+    elif own_mean <= VIP_REMOVAL_THRESHOLD:
+        retention_quality = "weak"
+    else:
+        retention_quality = "escaped"
+    # Mean residence (fraction of the rebinding MD spent inside the cavity).
+    residence_mean = float(np.mean(own_residences)) if own_residences else 0.0
+    # Convergence from the per-snapshot Q1→Q4 drift test (BIO). If most snapshots
+    # are non-converged, a low retention is sampling-limited — run longer MD.
+    converged = (n_conv / n_conv_total >= 0.5) if n_conv_total else None
+    # VIP score = mean(equilibrium retention, residence) × selectivity. Residence
+    # rewards a template that LINGERS even if it eventually drifts, so weak
+    # binders still get ranked instead of all collapsing to 0.
+    vip_score = 0.5 * (retention + residence_mean) * (1 + sel_score)
+
     return {
         "monomer": monomer_name,
         "n_snapshots": n_total,
         "removal_rate": round(removal_rate, 2),
         "rebind_rate": round(rebind_rate, 2),
         "both_rate": round(both_rate, 2),
+        "retention": round(retention, 3),
+        "retention_quality": retention_quality,
+        "residence": round(residence_mean, 3),
+        "converged": converged,
         "selectivity_score": round(sel_score, 2),
         "selectivity_index": round(selectivity_index, 3),
         "selectivity_index_per_interf": si_per_interf,
