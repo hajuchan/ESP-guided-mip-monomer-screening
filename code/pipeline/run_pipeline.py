@@ -1,19 +1,21 @@
 """
-MIP Screening Pipeline — Main Entry Point
-==========================================
-Multi-stage computational screening of functional monomers
-for Molecularly Imprinted Polymer (MIP) synthesis.
+MIP Screening Pipeline — Main Entry Point (7-stage)
+===================================================
+Config-driven computational screening of functional monomers for
+Molecularly Imprinted Polymer (MIP) synthesis. Full usage + examples live in
+the root wrapper docstring (../../run_pipeline.py); this module holds the CLI.
 
-Stage 1: GFN2-xTB fast screening
-Stage 2: DFT B3LYP-D3BJ/6-311+G* + ddCOSMO + BSSE
-Stage 3: Selectivity calculation and ranking
-Stage 4: OpenMM MD validation (RDF, EBN, H-bond)
+Stage 1: GFN2-xTB docking + pose ensemble
+Stage 2: DFT single-point (ωB97X-D / ωB97M-V + PCM + BSSE) on the xTB geometry
+Stage 3: Global porogen selection + ranking + cross-linker screening
+Stage 4: MMSD multi-monomer combination search (greedy / Bayesian / NSGA-II)
+Stage 5: Pre-polymerization MD (GROMACS/GAFF2; contact freq, EBN, morphology, MM-GBSA)
+Stage 6: VIP cavity rebinding (Q4/residence/retention; --reanalyze-vip, --extend-vip)
+Stage 7: Chemistry-specific synthesis recipe
 
-Additional features:
-  --crosslinker          Cross-linker screening
-  --suggest-interferents Auto interferent suggestion
-  --predict-if           IF prediction model
-  --report               Generate HTML report
+Modes: --stage {1..7,all} · --all-templates (MIP_TEMPLATE env) · --crosslinker ·
+       --reanalyze-vip · --extend-vip · --report · --suggest-interferents ·
+       --predict-if / --update-if-model. See --help for the full flag list.
 """
 
 import argparse

@@ -19,12 +19,17 @@ TEMPLATES = {
 # multi-target driver (run_pipeline --all-templates) run each target in its own
 # subprocess so config re-imports the right names cleanly per target.
 import os as _os
+import sys as _sys
 _DEFAULT_TEMPLATE = "Gamma-terpinene"
 TEMPLATE_NAME = _os.environ.get("MIP_TEMPLATE", _DEFAULT_TEMPLATE)
 if TEMPLATE_NAME not in TEMPLATES:
-    raise ValueError(
-        f"MIP_TEMPLATE={TEMPLATE_NAME!r} is not a key of TEMPLATES "
-        f"{list(TEMPLATES)}")
+    # Never hard-fail at import (that would block the whole pipeline before it
+    # even starts). Warn and fall back to the default so a stale/typo'd
+    # MIP_TEMPLATE in the shell can't take down every run.
+    print(f"[config] WARNING: MIP_TEMPLATE={TEMPLATE_NAME!r} is not a key of "
+          f"TEMPLATES {list(TEMPLATES)} — falling back to {_DEFAULT_TEMPLATE!r}.",
+          file=_sys.stderr)
+    TEMPLATE_NAME = _DEFAULT_TEMPLATE
 TEMPLATE_SMILES = TEMPLATES[TEMPLATE_NAME]
 
 # ── Monomer Library ──────────────────────────────────────────────────
@@ -90,8 +95,11 @@ STAGE1_TOP_N = None
 # Stage 3 global-porogen scoring uses the top-k monomers by binding (T_k). Not a
 # hard funnel — all monomers still pass to Stage 4 (MMSD searches over them).
 STAGE3_TOP_N = 3
-N_WORKERS    = 7       # CPU parallel processes
-N_GPU_WORKERS = 1      # GPU parallel processes (limited by VRAM)
+# CPU parallel processes. Stage 1 runs N_WORKERS xTB quantumdock jobs at once;
+# each is memory-heavy, so too many on a low-RAM box → OOM-killer (rc=137).
+# Override without editing this file: env MIP_WORKERS=2 python run_pipeline.py …
+N_WORKERS    = int(_os.environ.get("MIP_WORKERS", "7"))
+N_GPU_WORKERS = int(_os.environ.get("MIP_GPU_WORKERS", "1"))  # limited by VRAM
 USE_GPU      = True    # Use GPU acceleration when available
 from pathlib import Path as _Path
 OUTPUT_DIR   = str(_Path(__file__).resolve().parent.parent.parent / "results")
