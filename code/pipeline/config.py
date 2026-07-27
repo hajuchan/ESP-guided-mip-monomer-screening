@@ -96,9 +96,33 @@ STAGE1_TOP_N = None
 # hard funnel — all monomers still pass to Stage 4 (MMSD searches over them).
 STAGE3_TOP_N = 3
 # CPU parallel processes. Stage 1 runs N_WORKERS xTB quantumdock jobs at once;
-# each is memory-heavy, so too many on a low-RAM box → OOM-killer (rc=137).
-# Override without editing this file: env MIP_WORKERS=2 python run_pipeline.py …
-N_WORKERS    = int(_os.environ.get("MIP_WORKERS", "7"))
+# each is memory-heavy, so too many on a low-RAM box → OOM-killer (rc=137/-9).
+# Default: auto-size to ~80% of CPU cores, then CAP by available RAM (~2 GB per
+# worker) so it can never over-subscribe memory and OOM. Override explicitly
+# with env MIP_WORKERS=<n> (0/unset = auto). Tune the RAM budget with
+# MIP_RAM_PER_WORKER_GB.
+_RAM_PER_WORKER_GB = float(_os.environ.get("MIP_RAM_PER_WORKER_GB", "2.0"))
+
+
+def _auto_workers():
+    """~80% of cores, capped by available RAM (min 1)."""
+    n_cpu = _os.cpu_count() or 4
+    by_cpu = max(1, int(n_cpu * 0.8))               # 80% of cores
+    by_mem = by_cpu
+    try:                                             # cap by available RAM (Linux/WSL)
+        with open("/proc/meminfo") as _f:
+            for _line in _f:
+                if _line.startswith("MemAvailable:"):
+                    _avail_gb = int(_line.split()[1]) / (1024 ** 2)  # kB → GB
+                    by_mem = max(1, int(_avail_gb / _RAM_PER_WORKER_GB))
+                    break
+    except Exception:
+        pass
+    return max(1, min(by_cpu, by_mem))
+
+
+_env_workers = _os.environ.get("MIP_WORKERS")
+N_WORKERS = int(_env_workers) if (_env_workers and _env_workers != "0") else _auto_workers()
 N_GPU_WORKERS = int(_os.environ.get("MIP_GPU_WORKERS", "1"))  # limited by VRAM
 USE_GPU      = True    # Use GPU acceleration when available
 from pathlib import Path as _Path

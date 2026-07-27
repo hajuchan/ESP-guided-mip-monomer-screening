@@ -371,6 +371,11 @@ def main():
     # ── Main pipeline ────────────────────────────────────────────────
     logger.info(f"Template SMILES: {template}")
     logger.info(f"Output directory: {out_dir}")
+    from .config import N_WORKERS as _NW, N_GPU_WORKERS as _NGW
+    import os as _os2
+    _src = "env MIP_WORKERS" if _os2.environ.get("MIP_WORKERS") not in (None, "0") else "auto (~80% cores, RAM-capped)"
+    logger.info(f"CPU workers: {_NW} [{_src}], GPU workers: {_NGW}  "
+                f"(cores={_os2.cpu_count()})")
 
     t_total = time.time()
     timings = {}
