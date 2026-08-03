@@ -92,6 +92,14 @@ def run_stage6(template_smiles: str = None,
         if m_name not in monomer_library:
             continue
 
+        # Skip monomers whose Stage 5 MD never produced a trajectory (build/MD
+        # failed — e.g. weak binders that never solvated, like BMA). VIP needs a
+        # trajectory to seed the cavity; skip cleanly instead of raising.
+        if not (out_path.parent / "stage5" / m_name / "md.xtc").exists():
+            logger.info(f"  {m_name}: no Stage 5 MD trajectory — skipping VIP")
+            all_results[m_name] = {"success": False, "error": "no Stage 5 trajectory"}
+            continue
+
         logger.info(f"\n{'='*20} VIP: {m_name} {'='*20}")
 
         try:
