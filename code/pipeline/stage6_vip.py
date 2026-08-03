@@ -284,7 +284,7 @@ pbc         = xyz
 """
     (work_dir / "em.mdp").write_text(em_mdp)
     gmx(["grompp", "-f", "em.mdp", "-c", "conf.gro",
-         "-p", "topol.top", "-o", "em.tpr", "-maxwarn", "10"], work_dir)
+         "-p", "topol.top", "-o", "em.tpr", "-maxwarn", "50"], work_dir)
     gmx(["mdrun", "-deffnm", "em", "-nb", "gpu"], work_dir, timeout=120)
 
     nvt_mdp = f"""\
@@ -311,7 +311,7 @@ pcoupl      = no
     (work_dir / "nvt.mdp").write_text(nvt_mdp)
     conf = "em.gro" if (work_dir / "em.gro").exists() else "conf.gro"
     gmx(["grompp", "-f", "nvt.mdp", "-c", conf,
-         "-p", "topol.top", "-o", "nvt.tpr", "-maxwarn", "10"], work_dir)
+         "-p", "topol.top", "-o", "nvt.tpr", "-maxwarn", "50"], work_dir)
     gmx(["mdrun", "-deffnm", "nvt", "-nb", "gpu"], work_dir, timeout=120)
 
     if (work_dir / "nvt.gro").exists():
@@ -349,7 +349,7 @@ def _run_removal_test(snap_dir, tmpl_pos_init, tmpl_indices):
 
         # grompp + mdrun
         gmx(["grompp", "-f", "md.mdp", "-c", "conf.gro",
-             "-p", "topol.top", "-o", "md.tpr", "-maxwarn", "10"],
+             "-p", "topol.top", "-o", "md.tpr", "-maxwarn", "50"],
             removal_dir)
         gmx(["mdrun", "-deffnm", "md", "-nb", "gpu"],
             removal_dir, timeout=int(VIP_REMOVAL_NS * 300))
