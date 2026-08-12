@@ -570,8 +570,10 @@ def run_stage2(template_smiles: str = None,
     monomer_library = monomer_library or MONOMER_LIBRARY
     solvents = solvents or SOLVENTS
 
-    if monomer_names is None:
-        # Try loading stage1 results
+    if not monomer_names:
+        # Treat an empty list like None: an upstream stage that returned [] (all
+        # xTB failed, or every dE≥0) must not silently no-op the whole DFT stage.
+        # Fall back to the Stage-1 file, else the full library.
         stage1_path = Path(output_dir).parent / "stage1" / "stage1_top.json"
         if stage1_path.exists():
             with open(stage1_path) as f:
@@ -606,12 +608,19 @@ def run_stage2(template_smiles: str = None,
     pairs_to_run = []
     for m_name, m_smiles in monomers_to_run.items():
         for s_name, eps in solvents.items():
-            if (m_name in existing_results
-                    and s_name in existing_results[m_name]
-                    and existing_results[m_name][s_name].get("bsse_dE") is not None):
+            cached = (existing_results.get(m_name, {}) or {}).get(s_name)
+            has_energy = bool(cached) and cached.get("bsse_dE") is not None
+            # SMILES-stamp guard: recompute when the cached entry was computed
+            # for a DIFFERENT SMILES (e.g. APB para→meta, TRIM CH2 fix). Legacy
+            # entries predating the stamp have no 'smiles' and are trusted (skip)
+            # to avoid nuking the expensive DFT cache — purge those manually.
+            stale = has_energy and cached.get("smiles") not in (None, m_smiles)
+            if has_energy and not stale:
                 skip_count += 1
                 logger.info(f"  {m_name}/{s_name}: already computed, skipping")
             else:
+                if stale:
+                    logger.info(f"  {m_name}/{s_name}: SMILES changed → recomputing")
                 pairs_to_run.append((m_name, m_smiles, s_name, eps))
 
     n_total = len(monomers_to_run) * len(solvents)
@@ -628,27 +637,45 @@ def run_stage2(template_smiles: str = None,
             stage1_data = json.load(f)
         for entry in stage1_data:
             coords = entry.get("complex_coords")
-            if coords and entry.get("name"):
-                # Rebuild RDKit Mol from stored coordinates
-                from rdkit import Chem
-                from rdkit.Chem import AllChem
-                from rdkit.Geometry import Point3D
-                template_mol_tmp = smiles_to_mol3d(template_smiles)
-                monomer_mol_tmp = smiles_to_mol3d(entry["name"]
-                    if entry["name"] not in monomer_library
-                    else monomer_library[entry["name"]])
-                # Build combined mol with Stage 1 optimized coordinates
-                try:
-                    combo = Chem.CombineMols(template_mol_tmp, monomer_mol_tmp)
-                    combo = Chem.RWMol(combo)
-                    conf = combo.GetConformer()
-                    for i, (sym, x, y, z) in enumerate(coords):
-                        if i < combo.GetNumAtoms():
-                            conf.SetAtomPosition(i, Point3D(x, y, z))
-                    complex_mol_map[entry["name"]] = combo.GetMol()
-                    logger.info(f"  {entry['name']}: loaded Stage 1 complex ({len(coords)} atoms)")
-                except Exception as e:
-                    logger.warning(f"  {entry['name']}: failed to load Stage 1 complex: {e}")
+            name = entry.get("name")
+            if not (coords and name):
+                continue
+            cur_smiles = monomer_library.get(name)
+            # Stale-coordinate guard: the stored coords are index-mapped onto a
+            # freshly-built topology. If the Stage-1 entry was docked for a
+            # different SMILES, the atom ORDER may differ (e.g. APB para→meta) and
+            # the coords land on the wrong atoms → garbage geometry into expensive
+            # DFT. Skip the prebuilt (→ fresh dock) when the SMILES stamp differs.
+            if cur_smiles and entry.get("smiles") not in (None, cur_smiles):
+                logger.info(f"  {name}: Stage-1 SMILES changed → re-dock (skip prebuilt)")
+                continue
+            from rdkit import Chem
+            from rdkit.Chem import AllChem
+            from rdkit.Geometry import Point3D
+            template_mol_tmp = smiles_to_mol3d(template_smiles)
+            monomer_mol_tmp = smiles_to_mol3d(cur_smiles or name)
+            try:
+                combo = Chem.CombineMols(template_mol_tmp, monomer_mol_tmp)
+                combo = Chem.RWMol(combo)
+                conf = combo.GetConformer()
+                # Atom-count + per-atom element check: only trust the prebuilt if
+                # the stored coords correspond 1:1 to the rebuilt atoms.
+                if len(coords) != combo.GetNumAtoms():
+                    logger.info(f"  {name}: Stage-1 atom-count mismatch "
+                                f"({len(coords)} vs {combo.GetNumAtoms()}) → re-dock")
+                    continue
+                mismatch = next((i for i, (sym, *_ ) in enumerate(coords)
+                                 if combo.GetAtomWithIdx(i).GetSymbol() != sym), None)
+                if mismatch is not None:
+                    logger.info(f"  {name}: Stage-1 element order mismatch at atom "
+                                f"{mismatch} → re-dock (skip prebuilt)")
+                    continue
+                for i, (sym, x, y, z) in enumerate(coords):
+                    conf.SetAtomPosition(i, Point3D(x, y, z))
+                complex_mol_map[name] = combo.GetMol()
+                logger.info(f"  {name}: loaded Stage 1 complex ({len(coords)} atoms)")
+            except Exception as e:
+                logger.warning(f"  {name}: failed to load Stage 1 complex: {e}")
 
     if pairs_to_run:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -675,6 +702,7 @@ def run_stage2(template_smiles: str = None,
                         "raw_dE": res["raw_dE_kcal"],
                         "bsse_dE": res["bsse_dE_kcal"],
                         "bsse_correction": res["bsse_correction_kcal"],
+                        "smiles": m_smiles,  # stamp for the SMILES-change guard
                     }
                     logger.info(
                         f"  {m_name:>10s}/{s_name:<15s}: "

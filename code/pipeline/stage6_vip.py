@@ -33,7 +33,7 @@ from .config import (
     VIP_N_RESTARTS, VIP_MMPBSA, VIP_EXTEND_NS,
     MMPBSA_INTERVAL, MMPBSA_IGB,
 )
-from .utils_gromacs import gmx, MDP_NVT, MDP_PRODUCTION
+from .utils_gromacs import gmx, MDP_NVT, MDP_PRODUCTION, _solvent_resnames
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,12 @@ def run_stage6(template_smiles: str = None,
                monomer_library: dict = None,
                interferent_library: dict = None,
                output_dir: str = None) -> dict:
-    """Run VIP cavity rebinding for all monomers."""
+    """Run VIP cavity rebinding on the Stage-4 COMBINATIONS (combination-centric).
+
+    The imprinted cavity is formed by the monomer combination + crosslinker, so
+    VIP seeds from each combination's Stage-5 trajectory (rep0 if replicas were
+    run), freezes the whole matrix (monomers + crosslinker), removes the template,
+    and tests removal + rebinding. There is no per-monomer VIP."""
     template_smiles = template_smiles or TEMPLATE_SMILES
     monomer_library = monomer_library or MONOMER_LIBRARY
     interferent_library = interferent_library or INTERFERENT_LIBRARY
@@ -57,19 +62,18 @@ def run_stage6(template_smiles: str = None,
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Load monomer list
-    if monomer_names is None:
-        for src in [out_path.parent / "stage5" / "stage5_md.json",
-                    out_path.parent / "stage3" / "stage3_top.json"]:
-            if src.exists():
-                with open(src) as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    monomer_names = [r.get("monomer", r) if isinstance(r, dict) else r
-                                     for r in data]
-                break
-        if monomer_names is None:
-            monomer_names = list(monomer_library.keys())
+    # Load the Stage-5 combinations (ranked by mixture contact).
+    combos = []
+    s5c = out_path.parent / "stage5" / "stage5_combination.json"
+    if s5c.exists():
+        try:
+            combos = [c for c in json.load(open(s5c))
+                      if isinstance(c, dict) and c.get("md_analysis")]
+        except Exception:
+            combos = []
+    if not combos:
+        logger.error("Stage 6: no Stage-5 combination trajectories — run Stage 5 first")
+        return {}
 
     # Skip logic
     result_file = out_path / "stage6_vip.json"
@@ -77,45 +81,45 @@ def run_stage6(template_smiles: str = None,
     if result_file.exists():
         with open(result_file) as f:
             existing = json.load(f)
-    skip_names = {k for k, v in existing.items()
-                  if isinstance(v, dict) and v.get("n_snapshots", 0) > 0}
+    skip = {k for k, v in existing.items()
+            if isinstance(v, dict) and v.get("n_snapshots", 0) > 0}
 
     all_results = dict(existing)
-    logger.info(f"Stage 6: VIP rebinding for {monomer_names}")
-    if skip_names:
-        logger.info(f"  {len(skip_names)} already computed, skipping")
+    labels = ["+".join(c.get("selected", [])) or f"pc{c.get('rank')}" for c in combos]
+    logger.info(f"Stage 6: VIP rebinding for {len(combos)} combination(s): {labels}")
+    if skip:
+        logger.info(f"  {len(skip)} already computed, skipping")
 
-    for m_name in monomer_names:
-        if m_name in skip_names:
-            logger.info(f"  {m_name}: already computed, skipping")
-            continue
-        if m_name not in monomer_library:
-            continue
-
-        # Skip monomers whose Stage 5 MD never produced a trajectory (build/MD
-        # failed — e.g. weak binders that never solvated, like BMA). VIP needs a
-        # trajectory to seed the cavity; skip cleanly instead of raising.
-        if not (out_path.parent / "stage5" / m_name / "md.xtc").exists():
-            logger.info(f"  {m_name}: no Stage 5 MD trajectory — skipping VIP")
-            all_results[m_name] = {"success": False, "error": "no Stage 5 trajectory"}
+    for combo in combos:
+        rank = combo.get("rank")
+        sel = combo.get("selected", [])
+        label = "+".join(sel) or f"pc{rank}"
+        if label in skip:
+            logger.info(f"  {label}: already computed, skipping")
             continue
 
-        logger.info(f"\n{'='*20} VIP: {m_name} {'='*20}")
+        # Seed from the combination trajectory (rep0 if replicas were run).
+        pc_dir = out_path.parent / "stage5" / f"multi_monomer_pc{rank}"
+        seed_dir = pc_dir / "rep0" if (pc_dir / "rep0" / "md.xtc").exists() else pc_dir
+        if not (seed_dir / "md.xtc").exists():
+            logger.info(f"  {label}: no Stage-5 trajectory — skipping VIP")
+            all_results[label] = {"success": False, "error": "no Stage 5 trajectory"}
+            continue
 
+        logger.info(f"\n{'='*20} VIP: {label} {'='*20}")
         try:
             result = _vip_for_monomer(
-                template_smiles, m_name, monomer_library[m_name],
-                interferent_library,
-                str(out_path.parent / "stage5" / m_name),
-                str(out_path / m_name),
-            )
-            all_results[m_name] = result
+                template_smiles, label, "", interferent_library,
+                str(seed_dir), str(out_path / label))
+            result["combination"] = sel
+            result["rank"] = rank
+            all_results[label] = result
             with open(result_file, "w") as f:
                 json.dump(all_results, f, indent=2, default=str)
         except Exception as e:
-            logger.error(f"  VIP failed for {m_name}: {e}")
+            logger.error(f"  VIP failed for {label}: {e}")
             import traceback; traceback.print_exc()
-            all_results[m_name] = {"success": False, "error": str(e)}
+            all_results[label] = {"success": False, "error": str(e)}
 
     with open(result_file, "w") as f:
         json.dump(all_results, f, indent=2, default=str)
@@ -152,11 +156,11 @@ def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
 
     # Identify template and monomer atoms
     # Identify template vs monomer by residue order (resid 1 = template)
-    non_solvent = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    non_solvent = u.select_atoms(f"not resname {_solvent_resnames()}")
     first_resid = non_solvent.residues[0].resid
     template = u.select_atoms(f"resid {first_resid}")
     monomers = u.select_atoms(
-        f"not resname SOL NA CL Na+ Cl- and not resid {first_resid}")
+        f"not resname {_solvent_resnames()} and not resid {first_resid}")
     n_template = len(template)
 
     if n_template == 0:
@@ -229,10 +233,10 @@ def _vip_for_monomer(template_smiles, monomer_name, monomer_smiles,
 
 def _create_monomer_posre(universe, work_dir):
     """Create position restraint file for monomer heavy atoms."""
-    non_solvent = universe.select_atoms("not resname SOL NA CL Na+ Cl-")
+    non_solvent = universe.select_atoms(f"not resname {_solvent_resnames()}")
     first_resid = non_solvent.residues[0].resid
     monomers = universe.select_atoms(
-        f"not resname SOL NA CL Na+ Cl- and not resid {first_resid}")
+        f"not resname {_solvent_resnames()} and not resid {first_resid}")
     posre_path = Path(work_dir) / "posre_monomers.itp"
 
     with open(posre_path, "w") as f:
@@ -411,7 +415,7 @@ def _analyze_rebind_traj(rebind_dir, ref_gro, tmpl_indices, tmpl_pos_init, label
 
     idx = " ".join(str(i) for i in tmpl_indices)
     template = u.select_atoms(f"index {idx}")
-    monomers = u.select_atoms(f"not resname SOL NA CL Na+ Cl- and not index {idx}")
+    monomers = u.select_atoms(f"not resname {_solvent_resnames()} and not index {idx}")
     rmsds, contacts = [], []
     for ts in u.trajectory:
         rmsds.append(_compute_pbc_rmsd(template.positions, tmpl_pos_init, ts.dimensions))
@@ -744,7 +748,7 @@ def _snapshot_template_ref(snap_dir):
         return None, None
     try:
         u = mda.Universe(str(ref))
-        non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+        non_sol = u.select_atoms(f"not resname {_solvent_resnames()}")
         frid = non_sol.residues[0].resid
         template = u.select_atoms(f"resid {frid}")
         return list(template.indices), template.positions.copy()

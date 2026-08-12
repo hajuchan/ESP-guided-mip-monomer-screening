@@ -42,7 +42,7 @@ MONOMER_LIBRARY = {
     "ACM":     "C=CC(N)=O",              # Acrylamide
     "PYR":     "c1cc[nH]c1",             # Pyrrole
     "4VB":     "C=Cc1ccc(B(O)O)cc1",     # 4-Vinylphenylboronic acid
-    "APB":     "Nc1ccc(cc1)B(O)O",       # 3-Aminophenylboronic acid
+    "APB":     "Nc1cccc(B(O)O)c1",       # 3-Aminophenylboronic acid (meta, m-APBA)
     "Styrene": "C=Cc1ccccc1",            # Styrene
     "AA":      "C=CC(=O)O",              # Acrylic acid
     "NVP":     "C=CN1CCCC1=O",           # N-Vinylpyrrolidone
@@ -60,12 +60,17 @@ MONOMER_LIBRARY = {
     "HEMA":    "CC(=C)C(=O)OCCO",          # 2-Hydroxyethyl methacrylate (H-bond OH)
     "DMAEMA":  "CC(=C)C(=O)OCCN(C)C",      # 2-(Dimethylamino)ethyl methacrylate (cationic anchor)
     # ── Silane monomers (sol-gel; separate chemistry, auto-detected) ──
-    "APTES":   "NCCCO[Si](OCC)(OCC)OCC",   # 3-Aminopropyltriethoxysilane (amine anchor)
-    "MPTMS":   "SCCCO[Si](OC)(OC)OC",      # 3-Mercaptopropyltrimethoxysilane (thiol)
+    # Alkyl-substituted silanes bond the linker carbon DIRECTLY to Si (Si-C).
+    # Writing "...CO[Si]" instead of "...C[Si]" inserts an ether oxygen, making a
+    # tetraalkoxysilane whose organic group hydrolyses off in sol-gel — i.e. a
+    # molecule that does not exist in the real synthesis. Verified with RDKit
+    # against reference molecular formulas.
+    "APTES":   "NCCC[Si](OCC)(OCC)OCC",    # 3-Aminopropyltriethoxysilane (amine anchor)
+    "MPTMS":   "SCCC[Si](OC)(OC)OC",       # 3-Mercaptopropyltrimethoxysilane (thiol)
     "PTES":    "CCO[Si](OCC)(OCC)c1ccccc1",# Phenyltriethoxysilane (π-stack)
-    "IBTES":   "CC(C)CO[Si](OCC)(OCC)OCC", # Isobutyltriethoxysilane (hydrophobic)
-    "UPTMS":   "O=C(N)NCCCO[Si](OC)(OC)OC",# 3-Ureidopropyltrimethoxysilane (multi H-bond)
-    "CETES":   "N#CCCCO[Si](OCC)(OCC)OCC", # 3-Cyanopropyltriethoxysilane (H-bond acceptor)
+    "IBTES":   "CC(C)C[Si](OCC)(OCC)OCC",  # Isobutyltriethoxysilane (hydrophobic)
+    "UPTMS":   "O=C(N)NCCC[Si](OC)(OC)OC", # 3-Ureidopropyltrimethoxysilane (multi H-bond)
+    "CETES":   "N#CCCC[Si](OCC)(OCC)OCC",  # 3-Cyanopropyltriethoxysilane (H-bond acceptor)
 }
 
 # ── Interferent Library ──────────────────────────────────────────────
@@ -214,6 +219,19 @@ CAVITY_CORRECTION = True
 CAVITY_ALPHA = 0.10    # additive penalty: kcal/(mol·Å³), vdW 에너지 밀도 기반
 CAVITY_BETA = 0.5      # multiplicative exponent for volume ratio
 
+# ── Stage 3 monomer ranking: joint AFFINITY × SELECTIVITY ──
+# Selectivity alone is misleading: a monomer that is very selective but binds the
+# template only weakly makes a useless MIP (no thermodynamic driving force to
+# form the pre-polymerization complex → low imprinting factor). So the Stage 3
+# ranking gates on absolute affinity |E_Tar| and blends it with selectivity.
+#   AFFINITY_MIN_KCAL — |E_Tar| below this = "weak binder", demoted below all
+#                       viable binders and flagged (still passed to Stage 4).
+#   RANK_AFFINITY_WEIGHT / RANK_SELECTIVITY_WEIGHT — blend of min-max-normalized
+#                       affinity and selectivity used to order the viable set.
+AFFINITY_MIN_KCAL = 3.0
+RANK_AFFINITY_WEIGHT = 0.5
+RANK_SELECTIVITY_WEIGHT = 0.5
+
 
 def compute_molecular_volume(smiles: str) -> float:
     """Compute 3D molecular volume (Å³) from SMILES using RDKit."""
@@ -246,6 +264,18 @@ MMSD_MAX_COMBO_SIZE = 4        # 조합 최대 functional monomer 수
 MMSD_TOP_PC = 3                # MMSD가 산출하는 상위 조합(PC) 수
 MMSD_MD_TOP_N = 3              # Stage 5에서 MD로 검증할 상위 조합 수
 
+# ── Stage 5/6 funnel: cap the expensive per-monomer MD (50 ns each) + VIP ──
+# The per-monomer MD/VIP is the pipeline's cost bottleneck; running it over EVERY
+# binder just re-checks the DFT ranking. Restrict it to the monomers that Stage 4
+# actually selected — the union of functional monomers in the top MMSD_MD_TOP_N
+# combinations — topped up with the next-best singles from the Stage-3 joint
+# ranking, then capped here. The multi-monomer combo MD still validates the top
+# combinations regardless. Stage 6 follows automatically (it skips monomers with
+# no Stage-5 trajectory). None = no cap (validate every binder; the old ~35 h run).
+# Override per run with env MIP_STAGE5_TOP_N (0/unset = use this value).
+_env_s5 = _os.environ.get("MIP_STAGE5_TOP_N")
+STAGE5_TOP_N = int(_env_s5) if (_env_s5 and _env_s5 != "0") else 5
+
 # ── Stage 5: MD Parameters ──
 # 합성 비율 결정 방식:
 # "ebn"             — EBN(최대 동시 결합 수) 정비례, 자리 많은 monomer↑ (Yuan 2024, 형제식)
@@ -260,11 +290,45 @@ MD_TIME_NS = 50              # Production MD time (ns)
 MD_CONTACT_CUTOFF = 6.0      # Å, contact frequency cutoff
 MD_BOX_SIZE = 4.0            # nm, initial box size
 MD_TEMPERATURE = 298.15      # K, simulation temperature
-MD_SOLVENT = "water"         # "water" (TIP3P) or "acetonitrile" (GAFF2 explicit)
+# MD solvent for the pre-polymerization box. MIP pre-organization is strongly
+# porogen-dependent (low-ε toluene/chloroform preserve the H-bond complex that
+# ACN/water disrupt), so the MD MUST run in the actual porogen — not water.
+#   "auto"  — use the global porogen selected in Stage 3 (recommended)
+#   "water" — force TIP3P water (legacy; only physical for aqueous imprinting)
+#   an explicit name from SOLVENT_PROPERTIES (e.g. "Toluene", "Acetonitrile")
+# Any porogen that fails to parameterize/pack falls back to TIP3P water (warned).
+MD_SOLVENT = "auto"
+# Physical properties for building an explicit-solvent box of the chosen porogen
+# (gmx insert-molecules at the liquid density → gmx solvate tiles it). resname
+# is the 3-char GROMACS residue label; "SOL" routes to the built-in spc216 water.
+SOLVENT_PROPERTIES = {
+    "Water":        {"smiles": "O",          "density": 0.997, "mw": 18.02,  "resname": "SOL"},
+    "Acetonitrile": {"smiles": "CC#N",       "density": 0.786, "mw": 41.05,  "resname": "ACN"},
+    "Chloroform":   {"smiles": "ClC(Cl)Cl",  "density": 1.489, "mw": 119.38, "resname": "CHL"},
+    "Toluene":      {"smiles": "Cc1ccccc1",  "density": 0.867, "mw": 92.14,  "resname": "TOL"},
+    "Methanol":     {"smiles": "CO",         "density": 0.792, "mw": 32.04,  "resname": "MOH"},
+    "DMF":          {"smiles": "CN(C)C=O",   "density": 0.944, "mw": 73.09,  "resname": "DMF"},
+    "DMSO":         {"smiles": "CS(=O)C",    "density": 1.100, "mw": 78.13,  "resname": "DSO"},
+}
 MD_INCLUDE_CROSSLINKER =True   # True: add cross-linker to MD system (Ye 2024)
 MD_CROSSLINKER_RATIO = 20       # cross-linker:template molar ratio
 MD_MULTI_MONOMER = True         # True: include all top monomers in one simulation
 MD_MULTI_MONOMER_TOP_N = 3       # Number of top monomers to include in multi-monomer MD
+# Combination-centric Stage 5/6: Stage 5 runs MD ONLY on Stage 4's top
+# combinations (no per-monomer single MD); Stage 6 VIP seeds from the combination
+# trajectory. The imprinted cavity IS the monomer combination + crosslinker.
+# Each combination is run as N independent REPLICAS (different placement + velocity
+# seeds) whose per-monomer EBN / contact are AVERAGED — statistically more robust
+# than cramming more copies into one box, and it avoids the over-crowding that
+# inflates EBN (multi-restart practice; Yuan 2024 measured EBN≈2 with 8–10 copies,
+# so 6 copies/type is ample — literature small-molecule MIP boxes use 4–8/type).
+MD_COMBO_N_REPLICAS = 3
+# Copies of EACH monomer type in the combination (multi-monomer) MD box. The
+# synthesis ratio now comes from per-monomer EBN (max simultaneous binding) IN
+# THIS mixture, so there must be enough copies for EBN to discriminate — a
+# monomer that occupies e.g. 4 template sites needs ≥4 copies present. (Single-
+# monomer MD is no longer used for the ratio; the mixture measures it directly.)
+MD_COMBO_N_PER_MONOMER = 6
 
 # ── Stage 6: VIP Parameters ──
 VIP_N_SNAPSHOTS = 10             # Equilibrium snapshots (BIO: n=10 for stats)
@@ -290,7 +354,7 @@ CROSSLINKER_LIBRARY = {
     # vinyl (free-radical) crosslinkers
     "EGDMA": "C=C(C)C(=O)OCCOC(=O)C(=C)C",
     "DVB":   "C=Cc1ccccc1C=C",
-    "TRIM":  "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+    "TRIM":  "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)COC(=O)C(=C)C",  # trimethylolpropane trimethacrylate C18H26O6
     "BAM":   "C=CC(=O)NCCNC(=O)C=C",
     # silane (sol-gel) crosslinkers — used only for silane monomer combos
     "TEOS":  "CCO[Si](OCC)(OCC)OCC",       # Tetraethyl orthosilicate

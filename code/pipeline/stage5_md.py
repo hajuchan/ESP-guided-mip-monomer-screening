@@ -29,11 +29,42 @@ from .config import (
     MD_RATIO_SCREENING, MD_RATIOS_TO_TEST, MD_TEMPLATE_MONOMER_RATIO,
     MD_TIME_NS, MD_CONTACT_CUTOFF, MD_BOX_SIZE,
     MD_INCLUDE_CROSSLINKER, MD_CROSSLINKER_RATIO, MD_MULTI_MONOMER,
-    CROSSLINKER_LIBRARY,
+    CROSSLINKER_LIBRARY, MMSD_MD_TOP_N, MD_COMBO_N_PER_MONOMER,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [Stage5] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _classify_poly(smi):
+    """vinyl / silane / oxidative from SMILES (mirrors stage4/stage7)."""
+    try:
+        from rdkit import Chem
+        m = Chem.MolFromSmiles(smi)
+        if m is None:
+            return "unknown"
+        if m.HasSubstructMatch(Chem.MolFromSmarts("[Si]")):
+            return "silane"
+        if m.HasSubstructMatch(Chem.MolFromSmarts("[C;!a]=[C;!a]")):
+            return "vinyl"
+        return "oxidative"
+    except Exception:
+        return "unknown"
+
+
+def _compatible_crosslinker(m_smiles):
+    """Chemistry-matched crosslinker for a monomer's MD box: silane monomer →
+    silane crosslinker (TEOS/TMOS), vinyl → vinyl (EGDMA), oxidative → none.
+    Using EGDMA for every monomer put a vinyl crosslinker in silane/oxidative
+    boxes (a non-physical matrix). Returns (name, smiles, n_copies)."""
+    need = _classify_poly(m_smiles)
+    if need == "oxidative":
+        return None, None, 0
+    for name, smi in CROSSLINKER_LIBRARY.items():
+        if _classify_poly(smi) == need:
+            return name, smi, MD_CROSSLINKER_RATIO
+    n0 = next(iter(CROSSLINKER_LIBRARY.items()))  # fallback: first in library
+    return n0[0], n0[1], MD_CROSSLINKER_RATIO
 
 
 def run_stage5(template_smiles: str = None,
@@ -68,242 +99,186 @@ def run_stage5(template_smiles: str = None,
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Load monomer list.
-    # NOTE: treat an EMPTY list the same as None. run_pipeline passes
-    # prev_results["top_selective"]; if that is [] (e.g. an upstream stage
-    # returned nothing), a bare `is None` check would let MD iterate over zero
-    # monomers and finish in ~0 s — silently producing no trajectory. Falling
-    # back to the Stage-3 ranking file makes the stage self-healing.
-    if not monomer_names:
-        for src in [out_path.parent / "stage3" / "stage3_top.json",
-                    out_path.parent / "stage1" / "stage1_top.json"]:
-            if src.exists():
-                with open(src) as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    monomer_names = [r.get("name", r) if isinstance(r, dict) else r
-                                     for r in data]
-                break
-        if monomer_names is None:
-            monomer_names = list(monomer_library.keys())
-
-    # Skip logic
-    result_file = out_path / "stage5_md.json"
-    existing = []
-    existing_names = set()
-    if result_file.exists():
-        with open(result_file) as f:
-            existing = json.load(f)
-        if isinstance(existing, list):
-            existing_names = {r.get("monomer") for r in existing}
-
-    if existing_names:
-        logger.info(f"  {len(existing_names)} already computed, skipping")
-
-    all_results = list(existing)
-
-    logger.info(f"Stage 5: GROMACS MD for {monomer_names}")
-
-    for m_name in monomer_names:
-        if m_name in existing_names:
-            logger.info(f"  {m_name}: already computed, skipping")
-            continue
-        if m_name not in monomer_library:
-            logger.warning(f"  {m_name}: not in library, skipping")
-            continue
-
-        m_smiles = monomer_library[m_name]
-        ratios = MD_RATIOS_TO_TEST if MD_RATIO_SCREENING else [MD_TEMPLATE_MONOMER_RATIO]
-        n_mono = ratios[-1]  # Use highest ratio for analysis
-
-        logger.info(f"\n{'='*20} MD: {m_name} (1:{n_mono}) {'='*20}")
-
-        md_dir = out_path / m_name
-        md_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            # Build system
-            sys_info = build_mip_system(
-                template_smiles, "TMP",
-                m_smiles, m_name,
-                n_monomers=n_mono,
-                work_dir=md_dir / "build",
-                box_size=MD_BOX_SIZE,
-                temperature=TEMPERATURE,
-                crosslinker_smiles=list(CROSSLINKER_LIBRARY.values())[0] if MD_INCLUDE_CROSSLINKER else None,
-                crosslinker_name=list(CROSSLINKER_LIBRARY.keys())[0] if MD_INCLUDE_CROSSLINKER else None,
-                n_crosslinker=MD_CROSSLINKER_RATIO if MD_INCLUDE_CROSSLINKER else 0,
-            )
-
-            if "error" in sys_info:
-                logger.error(f"  System build failed: {sys_info['error']}")
-                continue
-
-            # Copy files to MD directory
-            import shutil
-            for f in (md_dir / "build").glob("*"):
-                if f.is_file():
-                    shutil.copy2(str(f), str(md_dir / f.name))
-
-            # Run MD
-            md_result = run_md_pipeline(
-                md_dir, time_ns=MD_TIME_NS,
-                temperature=TEMPERATURE,
-            )
-
-            # Analyze
-            analysis = analyze_md(md_dir, template_name="TMP",
-                                   cutoff_A=MD_CONTACT_CUTOFF)
-
-            result = {
-                "monomer": m_name,
-                "n_monomers": n_mono,
-                "md_time_ns": MD_TIME_NS,
-                "contact_frequency": analysis.get("contact_frequency", 0),
-                "EBN": analysis.get("EBN", 0),
-                "ebn_max": analysis.get("ebn_max_simultaneous", 0),
-                "mean_min_distance_A": analysis.get("mean_min_distance_A"),
-                "n_frames_analyzed": analysis.get("n_frames_analyzed", 0),
-                "n_hbonds_mean": analysis.get("n_hbonds_mean", 0),
-                "interaction_energy_kJ": analysis.get("interaction_energy_kJ"),
-                "interaction_energy_std": analysis.get("interaction_energy_std"),
-                "ie_method": analysis.get("ie_method", "N/A"),
-                "success": True,
-            }
-
-            all_results.append(result)
-            existing_names.add(m_name)
-
-            # Incremental save
-            with open(result_file, "w") as f:
-                json.dump(all_results, f, indent=2, default=str)
-
-            logger.info(f"  {m_name}: contact_freq={result['contact_frequency']:.4f}, "
-                        f"EBN={result['EBN']:.4f}")
-
-        except Exception as e:
-            logger.error(f"  Stage 5 failed for {m_name}: {e}")
-            import traceback; traceback.print_exc()
-
-    # Final save
-    with open(result_file, "w") as f:
-        json.dump(all_results, f, indent=2, default=str)
-
-    # Synthesis ratio recommendation
-    _recommend_ratios(all_results)
-    _print_summary(all_results)
-
-    # ── Multi-monomer MD: validate the top-N MMSD combinations ──
-    # (MD_MULTI_MONOMER / MD_INCLUDE_CROSSLINKER / MD_CROSSLINKER_RATIO are
-    # imported at module scope; re-importing them here would make Python treat
-    # them as function-locals for the WHOLE function → UnboundLocalError at the
-    # single-monomer loop above, which used them before this line ran.)
+    # ══ Combination-centric Stage 5 ══════════════════════════════════════
+    # The imprinted cavity is the monomer COMBINATION + crosslinker, so Stage 5
+    # runs MD ONLY on Stage 4's top combinations — there is no per-monomer single
+    # MD. Each combination is simulated as MD_COMBO_N_REPLICAS independent boxes
+    # (different placement); per-monomer EBN / contact are AVERAGED over the
+    # replicas (robust, and avoids the over-crowding that inflates EBN).
     from . import config as _cfg
     md_top_n = getattr(_cfg, "MMSD_MD_TOP_N", 3)
-    if MD_MULTI_MONOMER and len(all_results) >= 2:
-        logger.info(f"\n--- Multi-monomer MD (top-{md_top_n} MMSD combinations) ---")
+    n_reps = max(1, getattr(_cfg, "MD_COMBO_N_REPLICAS", 3))
+    n_per = MD_COMBO_N_PER_MONOMER
+
+    # Stage 4 combinations (or run MMSD here as a fallback).
+    mmsd_json = out_path.parent / "stage4" / "mmsd_results.json"
+    mres = None
+    if mmsd_json.exists():
         try:
-            # Load Stage 4 MMSD combinations (or run MMSD here as a fallback).
-            mmsd_json = out_path.parent / "stage4" / "mmsd_results.json"
+            mres = json.loads(mmsd_json.read_text())
+        except Exception:
             mres = None
-            if mmsd_json.exists():
-                try:
-                    mres = json.loads(mmsd_json.read_text())
-                except Exception:
-                    mres = None
-            if mres is None and getattr(_cfg, "MMSD_ENABLE", True):
-                try:
-                    from .stage4_mmsd import run_mmsd
-                    mres = run_mmsd(template_smiles=template_smiles,
-                                    output_dir=str(out_path.parent / "stage4"))
-                except Exception as e:
-                    logger.warning(f"  MMSD search failed ({e}); "
-                                   f"using greedy metric selection")
-
-            # Build the list of combinations to validate (top-N PCs from MMSD).
-            top_pcs = (mres or {}).get("top_pcs") or []
-            combos = []
-            for pc in top_pcs[:md_top_n]:
-                sel = [m for m in pc.get("functional_monomers", [])
-                       if m in monomer_library]
-                if sel:
-                    combos.append({
-                        "selected": sel,
-                        "score": pc.get("bo_objective") or 0.0,
-                        "method": f"MMSD ({(mres or {}).get('optimizer')})",
-                        "crosslinker": pc.get("crosslinker"),
-                        "mmsd": pc,
-                    })
-            if not combos:  # fallback: single greedy-metric combination
-                fb = _optimize_combination(all_results, monomer_library, out_path)
-                if fb and fb.get("selected"):
-                    combos = [fb]
-
-            from .utils_gromacs import (build_multi_monomer_system,
-                                        run_md_pipeline, analyze_md)
-            for rank, combo in enumerate(combos, 1):
-                combo["rank"] = rank
-                combo_names = combo["selected"]
-                combo_smiles = {n: monomer_library[n] for n in combo_names
-                                if n in monomer_library}
-                logger.info(f"  [PC{rank}] {combo_names} (score={combo['score']:.3f})")
-
-                mm_dir = out_path / f"multi_monomer_pc{rank}"
-                mm_dir.mkdir(parents=True, exist_ok=True)
-
-                # Prefer the crosslinker chosen by MMSD, else first in library.
-                _xl = combo.get("crosslinker")
-                if MD_INCLUDE_CROSSLINKER:
-                    xl_name = (_xl if _xl in CROSSLINKER_LIBRARY
-                               else list(CROSSLINKER_LIBRARY.keys())[0])
-                    xl_smiles = CROSSLINKER_LIBRARY[xl_name]
-                else:
-                    xl_name = xl_smiles = None
-
-                try:
-                    sys_info = build_multi_monomer_system(
-                        template_smiles, "TMP", combo_smiles,
-                        n_per_monomer=2, work_dir=mm_dir / "build",
-                        box_size=MD_BOX_SIZE + 1.0,
-                        crosslinker_smiles=xl_smiles, crosslinker_name=xl_name,
-                        n_crosslinker=MD_CROSSLINKER_RATIO if MD_INCLUDE_CROSSLINKER else 0,
-                    )
-                    if "error" in sys_info:
-                        combo["md_error"] = sys_info["error"]
-                        logger.warning(f"  [PC{rank}] build failed: {sys_info['error']}")
-                        continue
-                    import shutil as _shutil
-                    for f in (mm_dir / "build").glob("*"):
-                        if f.is_file():
-                            _shutil.copy2(str(f), str(mm_dir / f.name))
-                    run_md_pipeline(mm_dir, time_ns=MD_TIME_NS, temperature=TEMPERATURE)
-                    combo["md_analysis"] = analyze_md(mm_dir, template_name="TMP",
-                                                      cutoff_A=MD_CONTACT_CUTOFF)
-                    logger.info(f"  [PC{rank}] MD complete: contact="
-                                f"{combo['md_analysis'].get('contact_frequency', 0):.4f}")
-                    # GAP #1 (intermediate): MM/GBSA binding free energy from the MD
-                    if getattr(_cfg, "MD_MMPBSA", False):
-                        from .utils_gromacs import run_mmpbsa
-                        combo["mmpbsa"] = run_mmpbsa(
-                            mm_dir, interval=getattr(_cfg, "MMPBSA_INTERVAL", 10),
-                            igb=getattr(_cfg, "MMPBSA_IGB", 5))
-                except Exception as e:
-                    combo["md_error"] = str(e)
-                    logger.warning(f"  [PC{rank}] MD failed: {e}")
-
-            # Rank the validated combinations by MD contact frequency (desc).
-            combos.sort(
-                key=lambda c: c.get("md_analysis", {}).get("contact_frequency", -1.0),
-                reverse=True)
-            with open(out_path / "stage5_combination.json", "w") as f:
-                json.dump(combos, f, indent=2, default=str)
-            logger.info(f"  Saved {len(combos)} MD-validated combination(s) "
-                        f"→ stage5_combination.json")
+    if mres is None and getattr(_cfg, "MMSD_ENABLE", True):
+        try:
+            from .stage4_mmsd import run_mmsd
+            mres = run_mmsd(template_smiles=template_smiles,
+                            output_dir=str(out_path.parent / "stage4"))
         except Exception as e:
-            logger.warning(f"  Multi-monomer MD failed: {e}")
-            import traceback; traceback.print_exc()
+            logger.warning(f"  MMSD search failed ({e})")
 
-    return all_results
+    combos = []
+    for pc in ((mres or {}).get("top_pcs") or [])[:md_top_n]:
+        sel = [m for m in pc.get("functional_monomers", []) if m in monomer_library]
+        if sel:
+            combos.append({"selected": sel,
+                           "score": pc.get("bo_objective") or 0.0,
+                           "method": f"MMSD ({(mres or {}).get('optimizer')})",
+                           "crosslinker": pc.get("crosslinker"),
+                           "mmsd": pc})
+    result_file = out_path / "stage5_combination.json"
+    if not combos:
+        logger.error("Stage 5: no Stage-4 combinations to validate — run Stage 4 first")
+        with open(result_file, "w") as f:
+            json.dump([], f)
+        return []
+
+    # Resume: reuse a combination already fully computed.
+    existing = []
+    if result_file.exists():
+        try:
+            existing = json.load(open(result_file))
+        except Exception:
+            existing = []
+    done = {tuple(sorted(c.get("selected", []))): c for c in existing
+            if isinstance(c, dict) and c.get("md_analysis")}
+
+    from .utils_gromacs import (build_multi_monomer_system, run_md_pipeline,
+                                analyze_md)
+    logger.info(f"Stage 5: combination MD — {len(combos)} combination(s) × "
+                f"{n_reps} replica(s), {n_per} copies/monomer type")
+
+    for rank, combo in enumerate(combos, 1):
+        combo["rank"] = rank
+        key = tuple(sorted(combo["selected"]))
+        pc_dir = out_path / f"multi_monomer_pc{rank}"
+        traj0 = (pc_dir / "rep0" / "md.xtc") if n_reps > 1 else (pc_dir / "md.xtc")
+        if key in done and traj0.exists():
+            for k in ("md_analysis", "resname_map", "mmpbsa", "replicas", "ebn_censored"):
+                if k in done[key]:
+                    combo[k] = done[key][k]
+            logger.info(f"  [PC{rank}] {combo['selected']}: already computed, skipping")
+            continue
+
+        combo_smiles = {n: monomer_library[n] for n in combo["selected"]
+                        if n in monomer_library}
+        combo_box = MD_BOX_SIZE + 1.0 + 0.5 * max(0, len(combo_smiles) - 2)
+        # Crosslinker: MMSD sets crosslinker=None for self-crosslinking (oxidative)
+        # systems — respect that (no EGDMA in an incompatible matrix); only fall
+        # back to a default when a NAME was given that isn't in the library.
+        _xl = combo.get("crosslinker")
+        if MD_INCLUDE_CROSSLINKER and _xl is not None:
+            xl_name = (_xl if _xl in CROSSLINKER_LIBRARY
+                       else list(CROSSLINKER_LIBRARY.keys())[0])
+            xl_smiles = CROSSLINKER_LIBRARY[xl_name]
+            n_xl = MD_CROSSLINKER_RATIO
+        else:
+            xl_name = xl_smiles = None
+            n_xl = 0
+        logger.info(f"  [PC{rank}] {combo['selected']} + {xl_name or 'no'} xl "
+                    f"(score={combo['score']:.3f})")
+
+        rep_analyses, rmap = [], {}
+        for rep in range(n_reps):
+            rep_dir = pc_dir if n_reps == 1 else pc_dir / f"rep{rep}"
+            rep_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                sys_info = build_multi_monomer_system(
+                    template_smiles, "TMP", combo_smiles,
+                    n_per_monomer=n_per, work_dir=rep_dir / "build",
+                    box_size=combo_box, crosslinker_smiles=xl_smiles,
+                    crosslinker_name=xl_name, n_crosslinker=n_xl, seed=42 + rep)
+                if "error" in sys_info:
+                    logger.warning(f"  [PC{rank} rep{rep}] build failed: "
+                                   f"{sys_info['error']}")
+                    continue
+                import shutil as _shutil
+                for f in (rep_dir / "build").glob("*"):
+                    if f.is_file():
+                        _shutil.copy2(str(f), str(rep_dir / f.name))
+                run_md_pipeline(rep_dir, time_ns=MD_TIME_NS, temperature=TEMPERATURE)
+                a = analyze_md(rep_dir, template_name="TMP", cutoff_A=MD_CONTACT_CUTOFF)
+                rep_analyses.append(a)
+                rmap = sys_info.get("resname_map", rmap)
+                logger.info(f"  [PC{rank} rep{rep}] contact="
+                            f"{a.get('contact_frequency', 0):.4f}")
+                if getattr(_cfg, "MD_MMPBSA", False) and rep == 0:
+                    from .utils_gromacs import run_mmpbsa
+                    combo["mmpbsa"] = run_mmpbsa(
+                        rep_dir, interval=getattr(_cfg, "MMPBSA_INTERVAL", 10),
+                        igb=getattr(_cfg, "MMPBSA_IGB", 5))
+            except Exception as e:
+                logger.warning(f"  [PC{rank} rep{rep}] MD failed: {e}")
+
+        if not rep_analyses:
+            combo["md_error"] = "all replicas failed"
+        else:
+            agg, censored = _aggregate_replicas(rep_analyses, n_per)
+            combo["md_analysis"] = agg
+            combo["resname_map"] = rmap
+            combo["replicas"] = len(rep_analyses)
+            combo["ebn_censored"] = censored
+            if censored:
+                logger.warning(f"  [PC{rank}] EBN hit the copy cap ({n_per}) for "
+                               f"{censored} — raise MD_COMBO_N_PER_MONOMER.")
+            logger.info(f"  [PC{rank}] {len(rep_analyses)} replica(s) → contact="
+                        f"{agg.get('contact_frequency', 0):.4f}")
+        with open(result_file, "w") as f:
+            json.dump(combos, f, indent=2, default=str)
+
+    combos.sort(key=lambda c: c.get("md_analysis", {}).get("contact_frequency", -1.0),
+                reverse=True)
+    with open(result_file, "w") as f:
+        json.dump(combos, f, indent=2, default=str)
+    logger.info(f"  Saved {len(combos)} MD-validated combination(s) "
+                f"→ stage5_combination.json")
+    return combos
+
+
+def _aggregate_replicas(analyses, n_per):
+    """Average key metrics across independent replicas of a combination MD.
+    Returns (aggregated_analysis, censored_resnames). EBN censoring = a monomer
+    type whose MEAN EBN reaches the per-type copy cap n_per (the measurement is
+    supply-limited → the true EBN may be higher; raise MD_COMBO_N_PER_MONOMER)."""
+    import numpy as _np
+    agg = dict(analyses[0])                       # keep rdf/hbond/etc. from rep 0
+    for k in ("contact_frequency", "EBN", "ebn_max_simultaneous",
+              "mean_min_distance_A", "n_hbonds_mean"):
+        vals = [a.get(k) for a in analyses if isinstance(a.get(k), (int, float))]
+        if vals:
+            agg[k] = round(float(_np.mean(vals)), 4)
+
+    per_keys = set()
+    for a in analyses:
+        per_keys |= set((a.get("per_monomer") or {}).keys())
+    per, censored = {}, []
+    for rn in per_keys:
+        cfs = [(a.get("per_monomer") or {}).get(rn, {}).get("contact_frequency")
+               for a in analyses]
+        ebns = [(a.get("per_monomer") or {}).get(rn, {}).get("ebn_max")
+                for a in analyses]
+        cfs = [x for x in cfs if isinstance(x, (int, float))]
+        ebns = [x for x in ebns if isinstance(x, (int, float))]
+        mean_ebn = round(float(_np.mean(ebns)), 3) if ebns else 0
+        per[rn] = {
+            "contact_frequency": round(float(_np.mean(cfs)), 4) if cfs else 0.0,
+            "ebn_max": mean_ebn,
+            "ebn_replicas": ebns,
+        }
+        if ebns and mean_ebn >= n_per - 0.5:      # reached the supply cap
+            censored.append(rn)
+    agg["per_monomer"] = per
+    agg["n_replicas"] = len(analyses)
+    return agg, censored
 
 
 def _optimize_combination(all_results, monomer_library, out_path):

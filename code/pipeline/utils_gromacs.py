@@ -10,6 +10,7 @@ Key differences from Bio pipeline:
 - Simpler topology management
 """
 
+import json
 import logging
 import os
 import subprocess
@@ -270,6 +271,18 @@ def _generate_silane_itp(name: str, smiles: str, output_dir) -> dict:
                for i in range(rw.GetNumAtoms())]
     for idx in si_idx:
         charges[idx] = 0.9
+    # Enforce a neutral (integer) net charge. Forcing Si=+0.9 with no
+    # redistribution leaves the molecule at ~+0.8 e; PME cannot neutralize a
+    # fractional net charge (genion adds only integer ions) → spurious uniform
+    # background and garbage electrostatics for every silane. Spread the residual
+    # over all atoms and absorb 4-decimal rounding so the [atoms] block sums to 0.
+    _n = len(charges)
+    _resid = sum(charges) / _n if _n else 0.0
+    charges = [round(c - _resid, 4) for c in charges]
+    _drift = round(sum(charges), 4)
+    if abs(_drift) >= 1e-4:
+        _j = next((i for i in range(_n) if i not in si_idx), 0)
+        charges[_j] = round(charges[_j] - _drift, 4)
 
     si_type = _classify_si_type(smiles)
     si_lj = _POLCA_SI_LJ[si_type]
@@ -340,14 +353,33 @@ def _generate_silane_itp(name: str, smiles: str, output_dir) -> dict:
                 except Exception:
                     pass
 
+    # Proper dihedrals for rotatable (non-ring, non-aromatic) single bonds. The
+    # hand-built topology previously had NONE, leaving the alkyl-silane backbone
+    # with zero torsional barrier (unphysical free rotation). Add a generic 3-fold
+    # sp3 term (~GAFF2 X-c3-c3-X, 0.65 kJ/mol) so backbone sampling is realistic.
+    dlines = []
+    for bond in mol.GetBonds():
+        if bond.IsInRing() or bond.GetIsAromatic():
+            continue
+        b, c = bond.GetBeginAtom(), bond.GetEndAtom()
+        for a in b.GetNeighbors():
+            if a.GetIdx() == c.GetIdx():
+                continue
+            for d in c.GetNeighbors():
+                if d.GetIdx() in (b.GetIdx(), a.GetIdx()):
+                    continue
+                dlines.append(f"  {a.GetIdx()+1:5d}  {b.GetIdx()+1:5d}  "
+                              f"{c.GetIdx()+1:5d}  {d.GetIdx()+1:5d}    1    0.00  0.6500  3")
+
     bonds_section = "[ bonds ]\n" + "\n".join(blines) + "\n" if blines else ""
     angles_section = "\n[ angles ]\n" + "\n".join(aangle_lines) + "\n" if aangle_lines else ""
+    dihedrals_section = "\n[ dihedrals ]\n" + "\n".join(dlines) + "\n" if dlines else ""
 
     itp_path.write_text(
         f"; {name} - PolCA Si (Jorge 2021) + GAFF2\n"
         f"{atomtypes_section}"
         f"[ moleculetype ]\n{name}    3\n\n[ atoms ]\n"
-        + "\n".join(alines) + "\n\n" + bonds_section + angles_section,
+        + "\n".join(alines) + "\n\n" + bonds_section + angles_section + dihedrals_section,
         encoding="utf-8")
 
     gro_path = output_dir / f"{name}.gro"
@@ -473,7 +505,9 @@ def build_multi_monomer_system(template_smiles, template_name,
                                 temperature=298.15,
                                 crosslinker_smiles=None,
                                 crosslinker_name=None,
-                                n_crosslinker=0):
+                                n_crosslinker=0,
+                                solvent=None,
+                                seed=42):
     """Build a pre-polymerization system with multiple monomer types.
 
     Args:
@@ -495,7 +529,14 @@ def build_multi_monomer_system(template_smiles, template_name,
     if "error" in tmpl_param:
         return {"error": f"Template parameterization failed: {tmpl_param['error']}"}
 
-    tmpl_itp = _copy_and_split_itp(tmpl_param["itp"], work_dir, template_name)
+    tmpl_itp = _copy_and_split_itp(tmpl_param["itp"], work_dir, template_name,
+                                   resname="TMP")
+
+    # Unique, collision-free residue name per monomer type (M00, M01, …). NEVER
+    # derive it from the name: m_name[:3] can collide with TMP/XLK or a solvent
+    # resname (TOL/SOL/…), which would silently drop that monomer from the
+    # 'not resname <solvent> XLK' analysis selection or merge two monomer types.
+    mono_resnames = {n: f"M{i:02d}" for i, n in enumerate(monomer_dict)}
 
     # Parameterize each monomer type
     mono_params = {}
@@ -504,7 +545,8 @@ def build_multi_monomer_system(template_smiles, template_name,
         if "error" in p:
             logger.warning(f"  {m_name} parameterization failed, skipping")
             continue
-        _copy_and_split_itp(p["itp"], work_dir, m_name)
+        _copy_and_split_itp(p["itp"], work_dir, m_name,
+                            resname=mono_resnames[m_name])
         mono_params[m_name] = p
 
     if not mono_params:
@@ -516,14 +558,17 @@ def build_multi_monomer_system(template_smiles, template_name,
         xl_param = parameterize_small_molecule(
             crosslinker_smiles, crosslinker_name, work_dir / "param_crosslinker")
         if "error" not in xl_param:
-            _copy_and_split_itp(xl_param["itp"], work_dir, crosslinker_name)
+            _copy_and_split_itp(xl_param["itp"], work_dir, crosslinker_name,
+                                resname="XLK")
         else:
             xl_param = None
 
-    # Build initial GRO: template + all monomers + cross-linker
+    # Build initial GRO: template + all monomers + cross-linker.
+    # `seed` varies the random placement so independent replicas start from
+    # different configurations (Stage 5 averages EBN/contact over replicas).
     import numpy as np
     center = box_size / 2.0
-    rng = np.random.RandomState(42)
+    rng = np.random.RandomState(seed)
 
     tmpl_lines = Path(tmpl_param["gro"]).read_text().strip().split("\n")
     tmpl_natoms = int(tmpl_lines[1].strip())
@@ -548,7 +593,7 @@ def build_multi_monomer_system(template_smiles, template_name,
                     break
             offset = _gro_center_offset(mono_atoms, x, y, z)
             shifted = _shift_gro_atoms(mono_atoms, *offset, resnum=resnum,
-                                        resname=m_name[:3].upper())
+                                        resname=mono_resnames[m_name])
             all_atoms.extend(shifted)
             resnum += 1
 
@@ -577,6 +622,12 @@ def build_multi_monomer_system(template_smiles, template_name,
             f.write(line + "\n")
         f.write(f"   {box_size:.5f}   {box_size:.5f}   {box_size:.5f}\n")
 
+    # Resolve + build the porogen solvent box BEFORE writing the topology, so its
+    # ITP (atomtypes + moleculetype) is split into work_dir and can be #included
+    # in the correct order (all [atomtypes] must precede any [moleculetype]).
+    solv = _setup_md_solvent(work_dir, solvent=solvent, base_dir=work_dir)
+    logger.info(f"  MD solvent: {solv['name']}")
+
     # Write topology with all monomer types
     atomtype_includes = ""
     mol_includes = f'#include "{template_name}.itp"\n'
@@ -585,6 +636,8 @@ def build_multi_monomer_system(template_smiles, template_name,
     all_names = [template_name] + list(mono_params.keys())
     if xl_param:
         all_names.append(crosslinker_name)
+    if solv["resname"]:
+        all_names.append(solv["resname"])
 
     for name in all_names:
         at_file = work_dir / f"{name}_atomtypes.itp"
@@ -597,6 +650,9 @@ def build_multi_monomer_system(template_smiles, template_name,
     if xl_param:
         mol_includes += f'#include "{crosslinker_name}.itp"\n'
         mol_section += f"{crosslinker_name}    {n_crosslinker}\n"
+    if solv["resname"]:
+        # moleculetype only — gmx solvate appends the porogen COUNT to [molecules]
+        mol_includes += f'#include "{solv["resname"]}.itp"\n'
 
     top = f"""; MIP multi-monomer pre-polymerization topology
 #include "amber99sb-ildn.ff/forcefield.itp"
@@ -613,31 +669,17 @@ MIP multi-monomer pre-polymerization
     (work_dir / "topol.top").write_text(top)
     (work_dir / "em.mdp").write_text(MDP_EM)
 
-    # Solvate + ions
-    from .config import MD_SOLVENT
-    if MD_SOLVENT == "acetonitrile":
-        acn_gro = _get_acetonitrile_box(work_dir)
-        if acn_gro:
-            gmx(["solvate", "-cp", "system.gro", "-cs", str(acn_gro),
-                 "-o", "solvated.gro", "-p", "topol.top"], work_dir)
-        else:
-            gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
-                 "-o", "solvated.gro", "-p", "topol.top"], work_dir)
-    else:
-        gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
-             "-o", "solvated.gro", "-p", "topol.top"], work_dir)
-
-    gmx(["grompp", "-f", "em.mdp", "-c", "solvated.gro",
-         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "50"], work_dir)
-    gmx(["genion", "-s", "ions.tpr", "-o", "ions.gro",
-         "-p", "topol.top", "-pname", "NA", "-nname", "CL", "-neutral"],
-        work_dir, input_text="SOL\n")
+    # Solvate (chosen porogen or water) + neutralize
+    _solvate_and_ions(work_dir, solv)
 
     return {
         "gro": str(work_dir / "ions.gro"),
         "top": str(work_dir / "topol.top"),
         "monomer_names": list(mono_params.keys()),
         "n_per_monomer": n_per_monomer,
+        # resname (M00/M01/…) → monomer name, so analyze_md's per-resname contact
+        # can be attributed to each monomer for the mixture-based synthesis ratio.
+        "resname_map": {mono_resnames[n]: n for n in mono_params},
     }
 
 def build_mip_system(template_smiles: str, template_name: str,
@@ -647,12 +689,13 @@ def build_mip_system(template_smiles: str, template_name: str,
                       temperature: float = 298.15,
                       crosslinker_smiles: str = None,
                       crosslinker_name: str = None,
-                      n_crosslinker: int = 0) -> dict:
+                      n_crosslinker: int = 0,
+                      solvent: str = None) -> dict:
     """Build a pre-polymerization system: template + N monomers + [cross-linker] + solvent.
 
     1. Parameterize template, monomer, [cross-linker] (acpype/GAFF2)
     2. Create box with template at center, monomers + cross-linker randomly placed
-    3. Solvate with TIP3P water or explicit acetonitrile (Ye 2024)
+    3. Solvate with the chosen porogen (Stage-3 global porogen) or TIP3P water
     4. Add ions to neutralize
 
     Cross-linker inclusion: Ye et al. 2024 (Molecules)
@@ -681,48 +724,33 @@ def build_mip_system(template_smiles: str, template_name: str,
             logger.warning(f"  Cross-linker parameterization failed: {xl_param['error']}")
             xl_param = None
 
-    # Copy ITP files to work_dir, splitting [ atomtypes ] into separate file
-    tmpl_itp = _copy_and_split_itp(tmpl_param["itp"], work_dir, template_name)
-    mono_itp = _copy_and_split_itp(mono_param["itp"], work_dir, monomer_name)
+    # Copy ITP files to work_dir, splitting [ atomtypes ] into separate file,
+    # relabelling acpype's 'UNL' residue to TMP/MON/XLK so resname-based
+    # analysis selections (template/monomer/crosslinker separation) work.
+    tmpl_itp = _copy_and_split_itp(tmpl_param["itp"], work_dir, template_name,
+                                   resname="TMP")
+    mono_itp = _copy_and_split_itp(mono_param["itp"], work_dir, monomer_name,
+                                   resname="MON")
     if xl_param:
-        _copy_and_split_itp(xl_param["itp"], work_dir, crosslinker_name)
+        _copy_and_split_itp(xl_param["itp"], work_dir, crosslinker_name,
+                            resname="XLK")
 
     # Build combined GRO: template + monomers + cross-linker (random placement)
     _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size,
                        xl_param=xl_param, n_crosslinker=n_crosslinker)
 
+    # Resolve + build the porogen box before writing topology (atomtypes ordering)
+    solv = _setup_md_solvent(work_dir, solvent=solvent, base_dir=work_dir)
+    logger.info(f"  MD solvent: {solv['name']}")
+
     # Write topology
     _write_topology(template_name, monomer_name, n_monomers, work_dir,
                     crosslinker_name=crosslinker_name if xl_param else None,
-                    n_crosslinker=n_crosslinker if xl_param else 0)
+                    n_crosslinker=n_crosslinker if xl_param else 0,
+                    solvent_resname=solv["resname"])
 
-    # Solvate — explicit acetonitrile or TIP3P water
-    from .config import MD_SOLVENT
-    if MD_SOLVENT == "acetonitrile":
-        acn_gro = _get_acetonitrile_box(work_dir)
-        if acn_gro:
-            gmx(["solvate", "-cp", "system.gro", "-cs", str(acn_gro),
-                 "-o", "solvated.gro", "-p", "topol.top"],
-                work_dir)
-            # Add ACN ITP include to topology if not already present
-            _add_acn_to_topology(work_dir / "topol.top")
-        else:
-            logger.warning("  Acetonitrile box not found, falling back to TIP3P water")
-            gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
-                 "-o", "solvated.gro", "-p", "topol.top"],
-                work_dir)
-    else:
-        gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
-             "-o", "solvated.gro", "-p", "topol.top"],
-            work_dir)
-
-    # Add ions
-    gmx(["grompp", "-f", "em.mdp", "-c", "solvated.gro",
-         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "50"],
-        work_dir)
-    gmx(["genion", "-s", "ions.tpr", "-o", "ions.gro",
-         "-p", "topol.top", "-pname", "NA", "-nname", "CL", "-neutral"],
-        work_dir, input_text="SOL\n")
+    # Solvate (chosen porogen or water) + neutralize
+    _solvate_and_ions(work_dir, solv)
 
     return {
         "gro": str(work_dir / "ions.gro"),
@@ -733,50 +761,175 @@ def build_mip_system(template_smiles: str, template_name: str,
     }
 
 
-def _get_acetonitrile_box(work_dir):
-    """Generate a pre-equilibrated acetonitrile box using acpype + GROMACS.
-
-    Returns Path to acetonitrile box GRO, or None on failure.
-    Acetonitrile SMILES: CC#N
-    """
-    acn_dir = Path(work_dir) / "acn_solvent"
-    acn_dir.mkdir(exist_ok=True)
-    acn_box = acn_dir / "acn_box.gro"
-    if acn_box.exists():
-        return acn_box
-
-    try:
-        # Parameterize single acetonitrile molecule
-        acn_param = parameterize_small_molecule("CC#N", "ACN", acn_dir / "param")
-        if "error" in acn_param:
-            return None
-
-        # Create a box of ~500 acetonitrile molecules
-        # ACN density ~0.786 g/mL, MW=41.05, box=3nm → ~343 molecules
-        gmx(["insert-molecules", "-ci", acn_param["gro"], "-nmol", "400",
-             "-box", "3.0", "3.0", "3.0", "-o", "acn_box.gro"],
-            acn_dir)
-
-        if acn_box.exists():
-            logger.info("  Generated acetonitrile solvent box (400 molecules)")
-            return acn_box
-    except Exception as e:
-        logger.warning(f"  Acetonitrile box generation failed: {e}")
+def _read_global_porogen(base_dir):
+    """Walk up from base_dir to find Stage 3's global_porogen.json → porogen name."""
+    if not base_dir:
+        return None
+    p = Path(base_dir).resolve()
+    for anc in [p, *p.parents]:
+        gp = anc / "stage3" / "global_porogen.json"
+        if gp.exists():
+            try:
+                return json.loads(gp.read_text()).get("porogen")
+            except Exception:
+                return None
     return None
 
 
-def _add_acn_to_topology(topol_path):
-    """Add acetonitrile molecule count to topology file."""
-    text = Path(topol_path).read_text()
-    if "ACN" not in text:
-        # Count ACN molecules from solvated.gro
-        sol_gro = Path(topol_path).parent / "solvated.gro"
-        if sol_gro.exists():
-            content = sol_gro.read_text()
-            n_acn = content.count("ACN")  # approximate
-            if n_acn > 0:
-                text += f"\nACN              {n_acn}\n"
-                Path(topol_path).write_text(text)
+def _resolve_md_solvent(solvent=None, base_dir=None):
+    """Resolve the porogen NAME to solvate the MD box with.
+    Priority: explicit `solvent` arg → config MD_SOLVENT → 'Water'.
+    'auto' reads the Stage-3 global porogen (walking up from base_dir)."""
+    from .config import MD_SOLVENT
+    name = solvent if solvent is not None else MD_SOLVENT
+    if isinstance(name, str) and name.lower() == "auto":
+        name = _read_global_porogen(base_dir) or "Water"
+    if not name:
+        name = "Water"
+    alias = {"water": "Water", "h2o": "Water", "tip3p": "Water", "spc": "Water",
+             "acetonitrile": "Acetonitrile", "acn": "Acetonitrile",
+             "chloroform": "Chloroform", "toluene": "Toluene",
+             "methanol": "Methanol", "meoh": "Methanol",
+             "dmf": "DMF", "dmso": "DMSO"}
+    return alias.get(str(name).lower(), name)
+
+
+def _prepare_solvent_box(work_dir, solvent_name):
+    """Parameterize the porogen, split its ITP into work_dir (so the main
+    topology can #include it), and pack a density-correct cubic box for gmx
+    solvate. Returns (box_gro, resname, atoms_per_mol). (None, None, 0) signals
+    'use the built-in spc216 water box'. Never raises."""
+    from .config import SOLVENT_PROPERTIES
+    props = SOLVENT_PROPERTIES.get(solvent_name)
+    if not props or props.get("resname") == "SOL":
+        return None, None, 0                          # water → spc216
+    resn = props["resname"]
+    work_dir = Path(work_dir)
+    sdir = work_dir / f"solvent_{resn}"
+    sdir.mkdir(parents=True, exist_ok=True)
+    box_gro = sdir / "solvent_box.gro"
+    try:
+        param = parameterize_small_molecule(props["smiles"], resn, sdir / "param")
+        if "error" in param:
+            logger.warning(f"  Porogen {solvent_name} parameterization failed; "
+                           f"MD will fall back to TIP3P water")
+            return None, None, 0
+        # Make the porogen ITP (moleculetype + atomtypes) available to topol.top,
+        # relabelling acpype's 'UNL' residue to `resn`. CRITICAL: the moleculetype
+        # is named `resn`, and gmx solvate appends the box's RESIDUE name to
+        # [molecules] — so the box residue MUST also be `resn`, else grompp gets
+        # an orphan 'UNL <n>' line referencing an undefined moleculetype and the
+        # whole MD build fails (silently, since gmx() only warns).
+        _copy_and_split_itp(param["itp"], work_dir, resn, resname=resn)
+        apm = _count_atoms_in_gro(param.get("gro", "")) or 0
+        if not box_gro.exists():
+            edge = 3.0                                # nm
+            v_cm3 = (edge * 1e-7) ** 3
+            n = int(props["density"] * v_cm3 * 6.02214076e23 / props["mw"])
+            n = max(30, n)
+            gmx(["insert-molecules", "-ci", param["gro"], "-nmol", str(n),
+                 "-box", str(edge), str(edge), str(edge),
+                 "-o", "solvent_box.gro"], sdir)
+            if box_gro.exists():
+                _relabel_gro_residue(box_gro, resn)   # UNL → resn (match moltype)
+        if box_gro.exists():
+            logger.info(f"  Built {solvent_name} solvent box "
+                        f"(resname {resn}, {apm} atoms/mol) for MD")
+            return box_gro, resn, apm
+    except Exception as e:
+        logger.warning(f"  Porogen {solvent_name} box build failed ({e}); "
+                       f"MD will fall back to TIP3P water")
+    return None, None, 0
+
+
+def _setup_md_solvent(work_dir, solvent=None, base_dir=None):
+    """Resolve porogen + build its box. Returns
+    {name, resname, box, atoms_per_mol}; resname None → spc216 water."""
+    name = _resolve_md_solvent(solvent, base_dir if base_dir is not None else work_dir)
+    box, resn, apm = _prepare_solvent_box(work_dir, name)
+    if resn is None and name != "Water":
+        logger.info(f"  Solvent '{name}' unavailable → TIP3P water")
+        name = "Water"
+    return {"name": name, "resname": resn, "box": box, "atoms_per_mol": apm}
+
+
+def _ensure_solvent_count(work_dir, resname, atoms_per_mol):
+    """Guard: gmx solvate -p should append the porogen molecule count to
+    [ molecules ]; if it did not, count residues from solvated.gro and add it."""
+    import re
+    topol = Path(work_dir) / "topol.top"
+    text = topol.read_text()
+    if re.search(rf"(?m)^\s*{re.escape(resname)}\s+\d+\s*$", text):
+        return
+    gro = Path(work_dir) / "solvated.gro"
+    if not gro.exists() or atoms_per_mol <= 0:
+        return
+    lines = gro.read_text().split("\n")
+    try:
+        natoms = int(lines[1].strip())
+    except (IndexError, ValueError):
+        return
+    n_atoms = sum(1 for ln in lines[2:2 + natoms] if ln[5:10].strip() == resname)
+    n_mol = n_atoms // atoms_per_mol
+    if n_mol > 0:
+        topol.write_text(text.rstrip() + f"\n{resname}    {n_mol}\n")
+        logger.info(f"  [guard] Added {n_mol}× {resname} to [ molecules ]")
+
+
+def _make_solvent_index(work_dir, resname):
+    """Write genion.ndx with a 'SOL' group = the porogen residues, so genion can
+    embed neutralizing ions in a NON-water solvent (which has no built-in 'SOL'
+    group). Returns the index path, or None on failure."""
+    try:
+        import MDAnalysis as mda
+        from MDAnalysis.selections.gromacs import SelectionWriter
+        gro = Path(work_dir) / "solvated.gro"
+        u = mda.Universe(str(gro))
+        sel = u.select_atoms(f"resname {resname}")
+        if len(sel) == 0:
+            return None
+        ndx = Path(work_dir) / "genion.ndx"
+        with SelectionWriter(str(ndx), mode="w") as w:
+            w.write(u.atoms, name="System")
+            w.write(sel, name="SOL")
+        return ndx
+    except Exception as e:
+        logger.warning(f"  genion index build failed ({e})")
+        return None
+
+
+def _solvate_and_ions(work_dir, solv):
+    """gmx solvate (porogen box or spc216 water) + genion neutralize. For a
+    non-water porogen, genion needs an explicit 'SOL' index group; if the system
+    is already neutral (the usual case for acpype-built neutral molecules),
+    genion adds nothing and we fall back to the un-neutralized solvated box."""
+    import shutil as _shutil
+    work_dir = Path(work_dir)
+    porogen = bool(solv.get("box") and solv.get("resname"))
+    if porogen:
+        gmx(["solvate", "-cp", "system.gro", "-cs", str(solv["box"]),
+             "-o", "solvated.gro", "-p", "topol.top"], work_dir)
+        _ensure_solvent_count(work_dir, solv["resname"], solv.get("atoms_per_mol", 0))
+    else:
+        gmx(["solvate", "-cp", "system.gro", "-cs", "spc216.gro",
+             "-o", "solvated.gro", "-p", "topol.top"], work_dir)
+
+    gmx(["grompp", "-f", "em.mdp", "-c", "solvated.gro",
+         "-p", "topol.top", "-o", "ions.tpr", "-maxwarn", "50"], work_dir)
+
+    cmd = ["genion", "-s", "ions.tpr", "-o", "ions.gro",
+           "-p", "topol.top", "-pname", "NA", "-nname", "CL", "-neutral"]
+    if porogen:
+        ndx = _make_solvent_index(work_dir, solv["resname"])
+        if ndx:
+            cmd += ["-n", str(ndx)]
+    gmx(cmd, work_dir, input_text="SOL\n")
+
+    # Robustness: if genion produced no output (neutral system, or no SOL group
+    # in a porogen box), use the solvated box directly so the build never dies.
+    if not (work_dir / "ions.gro").exists():
+        logger.info("  genion added no ions (system neutral); using solvated box")
+        _shutil.copy2(str(work_dir / "solvated.gro"), str(work_dir / "ions.gro"))
 
 
 def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size,
@@ -855,11 +1008,14 @@ def _build_initial_gro(tmpl_param, mono_param, n_monomers, work_dir, box_size,
 
 
 def _write_topology(template_name, monomer_name, n_monomers, work_dir,
-                     crosslinker_name=None, n_crosslinker=0):
+                     crosslinker_name=None, n_crosslinker=0,
+                     solvent_resname=None):
     """Write GROMACS topology file.
 
     atomtypes must come before moleculetype, so they are included
-    right after the forcefield.itp.
+    right after the forcefield.itp. When `solvent_resname` is a porogen (not
+    water), its atomtypes + moleculetype are included too; gmx solvate appends
+    the porogen molecule COUNT to [ molecules ].
     """
     work_dir = Path(work_dir)
 
@@ -867,6 +1023,8 @@ def _write_topology(template_name, monomer_name, n_monomers, work_dir,
     mol_names = [template_name, monomer_name]
     if crosslinker_name:
         mol_names.append(crosslinker_name)
+    if solvent_resname:
+        mol_names.append(solvent_resname)
 
     atomtype_includes = ""
     for name in mol_names:
@@ -877,6 +1035,8 @@ def _write_topology(template_name, monomer_name, n_monomers, work_dir,
     mol_includes = f'#include "{template_name}.itp"\n#include "{monomer_name}.itp"\n'
     if crosslinker_name:
         mol_includes += f'#include "{crosslinker_name}.itp"\n'
+    if solvent_resname:
+        mol_includes += f'#include "{solvent_resname}.itp"\n'
 
     mol_section = f"{template_name}    1\n{monomer_name}    {n_monomers}\n"
     if crosslinker_name and n_crosslinker > 0:
@@ -1121,59 +1281,87 @@ def _parameterize_boron_molecule(mol, name, output_dir, charge_method, boron_ind
 
 
 def _fix_boron_itp(itp_path, mol, boron_indices):
-    """Fix ITP file: replace substituted C atom types with B parameters."""
+    """Fix the B->C-substituted ITP: restore the boron atomtype (LJ), boron MASS,
+    and the literature B-O / B-C / B-N bond and X-B-X angle parameters. Previously
+    only the vdW atomtype was patched — BORON_BONDS/BORON_ANGLES and the boron
+    mass were never applied, so the boronic group kept carbon geometry and mass."""
     content = Path(itp_path).read_text()
     lines = content.split("\n")
     new_lines = []
-
-    in_atomtypes = False
-    in_atoms = False
-    in_bonds = False
-    in_angles = False
-
-    # Map: which atom indices (0-based) are boron
-    b_set = set(boron_indices)
-    # In ITP, atom indices are 1-based
+    in_atomtypes = in_atoms = in_bonds = in_angles = False
     b_set_1based = {i + 1 for i in boron_indices}
+
+    def _elem(one_based):
+        try:
+            return mol.GetAtomWithIdx(one_based - 1).GetSymbol()
+        except Exception:
+            return "?"
 
     for line in lines:
         stripped = line.strip()
-
-        # Track sections
         if stripped.startswith("[ atomtypes ]"):
-            in_atomtypes = True; in_atoms = False; in_bonds = False; in_angles = False
+            in_atomtypes, in_atoms, in_bonds, in_angles = True, False, False, False
         elif stripped.startswith("[ atoms ]"):
-            in_atoms = True; in_atomtypes = False; in_bonds = False; in_angles = False
+            in_atomtypes, in_atoms, in_bonds, in_angles = False, True, False, False
         elif stripped.startswith("[ bonds ]"):
-            in_bonds = True; in_atoms = False; in_atomtypes = False; in_angles = False
+            in_atomtypes, in_atoms, in_bonds, in_angles = False, False, True, False
         elif stripped.startswith("[ angles ]"):
-            in_angles = True; in_bonds = False; in_atoms = False; in_atomtypes = False
+            in_atomtypes, in_atoms, in_bonds, in_angles = False, False, False, True
         elif stripped.startswith("["):
             in_atomtypes = in_atoms = in_bonds = in_angles = False
 
-        # Fix atomtypes: add B type
-        if in_atomtypes and not stripped.startswith(";") and not stripped.startswith("[") and stripped:
-            # Add B atomtype after the section header (once)
+        # Add the boron atomtype once (LJ + correct mass 10.811)
+        if in_atomtypes and stripped and not stripped.startswith((";", "[")):
             if "b_boron" not in content:
                 new_lines.append(line)
-                # Add boron atom type
                 new_lines.append(
-                    f" b_boron  b_boron  0.00000  0.00000   A "
+                    f" b_boron  b_boron  10.81100  0.00000   A "
                     f"  {BORON_VDW['sigma']:.5e}   {BORON_VDW['epsilon']:.5e} ; Boron (UFF)")
-                content += "b_boron"  # prevent duplicate
+                content += "b_boron"
                 continue
 
-        # Fix atoms section: change atom type for B atoms
-        if in_atoms and not stripped.startswith(";") and stripped:
+        # [atoms]: set boron atomtype + boron mass (col 8), keep proxy charge
+        elif in_atoms and stripped and not stripped.startswith(";"):
             parts = stripped.split()
-            if len(parts) >= 7:
+            if len(parts) >= 8:
                 try:
-                    atom_idx = int(parts[0])
-                    if atom_idx in b_set_1based:
-                        # Replace atom type with b_boron
-                        parts[1] = "b_boron"  # atom type
-                        parts[4] = "b_boron"  # charge group type
+                    if int(parts[0]) in b_set_1based:
+                        parts[1] = "b_boron"     # atomtype
+                        parts[7] = "10.811"       # mass (was carbon 12.011)
                         line = "  ".join(parts)
+                except (ValueError, IndexError):
+                    pass
+
+        # [bonds]: rewrite r0/k for any B-O / B-C / B-N bond (literature)
+        elif in_bonds and stripped and not stripped.startswith((";", "[")):
+            parts = stripped.split()
+            if len(parts) >= 5:
+                try:
+                    i, j = int(parts[0]), int(parts[1])
+                    if i in b_set_1based or j in b_set_1based:
+                        other = j if i in b_set_1based else i
+                        key = {"O": "B-O", "C": "B-C", "N": "B-N"}.get(_elem(other))
+                        if key in BORON_BONDS:
+                            bp = BORON_BONDS[key]
+                            line = (f"  {i:5d}  {j:5d}    1    "
+                                    f"{bp['r0']:.4f}  {bp['k']:.1f} ; {key}")
+                except (ValueError, IndexError):
+                    pass
+
+        # [angles]: rewrite theta0/k for X-B-X angles where boron is central
+        elif in_angles and stripped and not stripped.startswith((";", "[")):
+            parts = stripped.split()
+            if len(parts) >= 6:
+                try:
+                    ai, aj, ak = int(parts[0]), int(parts[1]), int(parts[2])
+                    if aj in b_set_1based:
+                        outers = tuple(sorted([_elem(ai), _elem(ak)]))
+                        akey = {("C", "O"): "C-B-O", ("O", "O"): "O-B-O",
+                                ("C", "N"): "C-B-N", ("N", "O"): "N-B-O"}.get(outers)
+                        if akey in BORON_ANGLES:
+                            ap = BORON_ANGLES[akey]
+                            line = (f"  {ai:5d}  {aj:5d}  {ak:5d}    1    "
+                                    f"{ap['theta0']:.2f}  {ap['k']:.2f} ; {akey}")
                 except (ValueError, IndexError):
                     pass
 
@@ -1200,12 +1388,58 @@ def _fix_boron_gro(gro_path, mol, boron_indices):
 
 # ── ITP Processing ──
 
-def _copy_and_split_itp(src_itp: str, work_dir: Path, name: str) -> str:
+def _relabel_itp_residue(lines, resname):
+    """Rewrite the [ atoms ] residue column (field 4) of an ITP to `resname`.
+    acpype labels EVERY molecule's residue 'UNL', so template/monomer/crosslinker/
+    porogen are indistinguishable by resname in the .tpr and trajectory — which
+    silently breaks every `resname`-based analysis selection (crosslinker
+    exclusion, solvent exclusion, VIP). Grompp matches [molecules] by moleculetype
+    NAME (untouched here), so relabelling the residue is safe."""
+    out, in_atoms = [], False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("["):
+            in_atoms = s.startswith("[ atoms ]")
+            out.append(line)
+            continue
+        if in_atoms and s and not s.startswith(";"):
+            code, sep, comment = line.partition(";")
+            parts = code.split()
+            if len(parts) >= 8:
+                parts[3] = resname                      # residue column
+                out.append("  ".join(parts) + (f" ;{comment}" if sep else ""))
+                continue
+        out.append(line)
+    return out
+
+
+def _relabel_gro_residue(gro_path, resname):
+    """Rewrite the residue-name field (cols 5:10) of every atom in a .gro."""
+    p = Path(gro_path)
+    lines = p.read_text().split("\n")
+    if len(lines) < 3:
+        return
+    try:
+        n = int(lines[1].strip())
+    except (ValueError, IndexError):
+        return
+    out = lines[:2]
+    for ln in lines[2:2 + n]:
+        out.append((ln[:5] + f"{resname:<5s}"[:5] + ln[10:]) if len(ln) >= 10 else ln)
+    out += lines[2 + n:]
+    p.write_text("\n".join(out))
+
+
+def _copy_and_split_itp(src_itp: str, work_dir: Path, name: str,
+                        resname: str = None) -> str:
     """Copy ITP file, splitting [ atomtypes ] into a separate _atomtypes.itp.
 
     GROMACS requires [ atomtypes ] before [ moleculetype ] in the topology.
     acpype puts both in one ITP, causing 'Invalid order for directive' error.
     Solution: split atomtypes into {name}_atomtypes.itp, included before the main ITP.
+
+    If `resname` is given, the [ atoms ] residue column is relabelled from
+    acpype's 'UNL' to it, so downstream `resname`-based selections work.
     """
     src = Path(src_itp)
     content = src.read_text()
@@ -1237,6 +1471,10 @@ def _copy_and_split_itp(src_itp: str, work_dir: Path, name: str) -> str:
         at_path = work_dir / f"{name}_atomtypes.itp"
         at_path.write_text("\n".join(atomtypes_lines) + "\n")
 
+    # Relabel residue (acpype 'UNL' → intended resname) for analysis selections
+    if resname:
+        molecule_lines = _relabel_itp_residue(molecule_lines, resname)
+
     # Write molecule ITP (without atomtypes)
     itp_path = work_dir / f"{name}.itp"
     itp_path.write_text("\n".join(molecule_lines) + "\n")
@@ -1245,6 +1483,23 @@ def _copy_and_split_itp(src_itp: str, work_dir: Path, name: str) -> str:
 
 
 # ── Analysis ──
+
+def _solvent_resnames():
+    """All resnames that count as SOLVENT/ions in a trajectory — water, ions, and
+    every porogen in SOLVENT_PROPERTIES. Used to build 'not resname ...' monomer
+    selections so the porogen never leaks into monomer/template statistics."""
+    base = ["SOL", "WAT", "NA", "CL", "Na+", "Cl-", "K", "K+"]
+    try:
+        from .config import SOLVENT_PROPERTIES
+        base += [v["resname"] for v in SOLVENT_PROPERTIES.values()]
+    except Exception:
+        base += ["ACN", "CHL", "TOL", "MOH", "DMF", "DSO"]
+    seen, out = set(), []
+    for r in base:
+        if r not in seen:
+            seen.add(r); out.append(r)
+    return " ".join(out)
+
 
 def run_mmpbsa(work_dir: Path, interval: int = 10, igb: int = 5,
                start_frac: float = 0.5, timeout: int = 3600) -> dict:
@@ -1269,13 +1524,13 @@ def run_mmpbsa(work_dir: Path, interval: int = 10, igb: int = 5,
         import MDAnalysis as mda
         from MDAnalysis.selections.gromacs import SelectionWriter
         u = load_universe(Path(tpr).parent, xtc)
-        non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+        non_sol = u.select_atoms(f"not resname {_solvent_resnames()}")
         if len(non_sol.residues) < 2:
             return {"error": "need template + >=1 monomer for MM/PBSA"}
         frid = non_sol.residues[0].resid
         lig = u.select_atoms(f"resid {frid}")                       # template
-        rec = u.select_atoms(                                        # monomers + XL
-            f"not resname SOL NA CL Na+ Cl- and not resid {frid}")
+        rec = u.select_atoms(                                        # monomers only
+            f"not resname {_solvent_resnames()} XLK and not resid {frid}")
         ndx = work_dir / "mmpbsa_index.ndx"
         with SelectionWriter(str(ndx), mode="w") as w:
             w.write(rec, name="receptor")
@@ -1297,7 +1552,14 @@ def run_mmpbsa(work_dir: Path, interval: int = 10, igb: int = 5,
                            text=True, timeout=timeout)
         if out.exists():
             txt = out.read_text()
-            m = re.search(r"(?:ΔTOTAL|DELTA TOTAL|TOTAL)\s+([-\d.]+)", txt)
+            # Match the Δ (binding) TOTAL only — a bare 'TOTAL' would match the
+            # Complex/Receptor/Ligand per-component ABSOLUTE energy (hundreds of
+            # kcal/mol) that appears earlier, mis-reporting it as ΔG_bind.
+            m = re.search(r"(?m)^\s*(?:ΔTOTAL|DELTA\s+TOTAL)\s+([-\d.]+)", txt)
+            if not m:  # fall back: the TOTAL inside the 'Delta (...)' section
+                d = re.search(r"Delta\s*\(", txt)
+                if d:
+                    m = re.search(r"(?m)^\s*TOTAL\s+([-\d.]+)", txt[d.start():])
             if m:
                 dg = round(float(m.group(1)), 3)
                 logger.info(f"  MM/GBSA ΔG_bind = {dg:+.3f} kcal/mol")
@@ -1345,14 +1607,19 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
     # Identify template vs monomer by residue order
     # acpype assigns all molecules as "UNL", so we use resid:
     # resid 1 = template, resid 2+ (non-SOL) = monomers
-    non_solvent = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    non_solvent = u.select_atoms(f"not resname {_solvent_resnames()}")
     if len(non_solvent.residues) == 0:
         return {"error": "No non-solvent residues found"}
 
     first_resid = non_solvent.residues[0].resid
     template = u.select_atoms(f"resid {first_resid}")
+    # Exclude the crosslinker (resname XLK): contact_freq / EBN / residence /
+    # RDF / H-bonds must measure MONOMER-template binding only. Counting the
+    # crosslinker as a "monomer" would inflate (or deflate) every statistic that
+    # drives ranking and the EBN synthesis ratio. Crosslinker proximity is
+    # measured separately below via `resname XLK`.
     monomers = u.select_atoms(
-        f"not resname SOL NA CL Na+ Cl- and not resid {first_resid}")
+        f"not resname {_solvent_resnames()} XLK and not resid {first_resid}")
     n_frames = len(u.trajectory)
 
     if len(template) == 0 or len(monomers) == 0:
@@ -1366,6 +1633,13 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
 
     # ── Contact frequency + residence time ──
     n_monomer_residues = len(monomers.residues)
+    # Per-monomer-TYPE tracking: each monomer type has a unique resname (M00, M01,
+    # … from build_multi_monomer_system), so we can measure each type's template
+    # engagement WITHIN the actual mixture → mixture-based synthesis ratio (Stage 7).
+    res_resnames = [res.resname for res in monomers.residues]
+    uniq_rn = sorted(set(res_resnames))
+    per_rn_contacts = {rn: 0 for rn in uniq_rn}   # total contact-frames per type
+    per_rn_ebn = {rn: 0 for rn in uniq_rn}        # max simultaneous per type (EBN)
     contact_per_frame = []
     min_distances = []
     residence_counts = np.zeros(n_monomer_residues)  # consecutive contact frames
@@ -1373,6 +1647,7 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
 
     for ts in u.trajectory[start_frame:]:
         frame_contacts = 0
+        per_rn_this = {rn: 0 for rn in uniq_rn}
         for ri, res in enumerate(monomers.residues):
             try:
                 dists = np.linalg.norm(
@@ -1382,6 +1657,8 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
                 min_distances.append(min_d)
                 if min_d < cutoff_A:
                     frame_contacts += 1
+                    per_rn_contacts[res_resnames[ri]] += 1
+                    per_rn_this[res_resnames[ri]] += 1
                     if in_contact[ri]:
                         residence_counts[ri] += 1
                     in_contact[ri] = True
@@ -1390,6 +1667,9 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
             except Exception:
                 pass
         contact_per_frame.append(frame_contacts)
+        for rn in uniq_rn:
+            if per_rn_this[rn] > per_rn_ebn[rn]:
+                per_rn_ebn[rn] = per_rn_this[rn]
 
     total_frames = len(contact_per_frame)
     total_contacts = sum(contact_per_frame)
@@ -1398,6 +1678,17 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
     max_residence = float(residence_counts.max()) if len(residence_counts) > 0 else 0
 
     results["contact_frequency"] = round(float(contact_freq), 4)
+    # Per-monomer-type engagement in the mixture (keyed by resname; the combo
+    # records resname→name so Stage 7 can turn this into the co-monomer ratio).
+    results["per_monomer"] = {
+        rn: {
+            "contact_frequency": round(per_rn_contacts[rn]
+                                       / (total_frames * res_resnames.count(rn)), 4)
+                                 if (total_frames and res_resnames.count(rn)) else 0.0,
+            "ebn_max": int(per_rn_ebn[rn]),
+            "n_residues": res_resnames.count(rn),
+        } for rn in uniq_rn
+    }
     results["mean_contacts_per_frame"] = round(float(mean_contacts_per_frame), 2)
     # EBN (Yuan et al. 2024) = max simultaneous binding count of this monomer type
     # to the template over the trajectory → drives the EBN-based synthesis ratio.
@@ -1478,26 +1769,26 @@ def analyze_md(work_dir: Path, template_name: str = "TMP",
         full_traj = str(work_dir / "md.xtc")
         if Path(full_traj).exists() and Path(top).exists():
             u_full = load_universe(work_dir, full_traj)
-            non_sol_full = u_full.select_atoms("not resname SOL NA CL Na+ Cl-")
+            non_sol_full = u_full.select_atoms(f"not resname {_solvent_resnames()}")
             frid = non_sol_full.residues[0].resid
             n_frames_full = len(u_full.trajectory)
             start_full = n_frames_full // 2
 
             from MDAnalysis.analysis.hydrogenbonds import HydrogenBondAnalysis
 
-            # Template as donor → monomer as acceptor
+            # Template as donor → monomer as acceptor (exclude crosslinker XLK)
             hb1 = HydrogenBondAnalysis(
                 u_full, d_a_cutoff=3.5, d_h_a_angle_cutoff=130,
                 donors_sel=f"resid {frid}",
-                acceptors_sel=f"not resname SOL NA CL Na+ Cl- and not resid {frid}",
+                acceptors_sel=f"not resname {_solvent_resnames()} XLK and not resid {frid}",
             )
             hb1.run(start=start_full)
             n1 = hb1.results.hbonds.shape[0] if hasattr(hb1.results, 'hbonds') else 0
 
-            # Monomer as donor → template as acceptor
+            # Monomer as donor → template as acceptor (exclude crosslinker XLK)
             hb2 = HydrogenBondAnalysis(
                 u_full, d_a_cutoff=3.5, d_h_a_angle_cutoff=130,
-                donors_sel=f"not resname SOL NA CL Na+ Cl- and not resid {frid}",
+                donors_sel=f"not resname {_solvent_resnames()} XLK and not resid {frid}",
                 acceptors_sel=f"resid {frid}",
             )
             hb2.run(start=start_full)
@@ -1669,9 +1960,9 @@ def _compute_mmpbsa(work_dir, template_resid, start_frame=0):
     # Create index groups
     import MDAnalysis as mda
     u = load_universe(Path(tpr).parent)
-    non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    non_sol = u.select_atoms(f"not resname {_solvent_resnames()}")
     tmpl = u.select_atoms(f"resid {template_resid}")
-    mono = non_sol.select_atoms(f"not resid {template_resid}")
+    mono = non_sol.select_atoms(f"not resid {template_resid} and not resname XLK")
 
     if len(tmpl) == 0 or len(mono) == 0:
         return {"error": "Template or monomer selection empty"}
@@ -1727,8 +2018,10 @@ print_res="within 6"
         if final_dat.exists():
             text = final_dat.read_text()
             import re
-            # Look for "DELTA TOTAL" line
-            match = re.search(r"DELTA TOTAL\s+([-\d.]+)\s+([-\d.]+)", text)
+            # Look for the Δ (binding) TOTAL line — accept the Greek 'ΔTOTAL'
+            # (current gmx_MMPBSA) as well as ASCII 'DELTA TOTAL'.
+            match = re.search(
+                r"(?m)^\s*(?:ΔTOTAL|DELTA\s+TOTAL)\s+([-\d.]+)\s+([-\d.]+)", text)
             if match:
                 mean_dg = float(match.group(1))
                 std_dg = float(match.group(2))
@@ -1814,9 +2107,10 @@ def _compute_interaction_energy(work_dir, template_resid, start_frame=0):
     # Create index file with template and monomer groups
     import MDAnalysis as mda
     u = load_universe(Path(tpr).parent)
-    non_sol = u.select_atoms("not resname SOL NA CL Na+ Cl-")
+    non_sol = u.select_atoms(f"not resname {_solvent_resnames()}")
     tmpl_indices = u.select_atoms(f"resid {template_resid}").indices
-    mono_indices = non_sol.select_atoms(f"not resid {template_resid}").indices
+    mono_indices = non_sol.select_atoms(
+        f"not resid {template_resid} and not resname XLK").indices
 
     ndx_path = ie_dir / "ie.ndx"
     with open(ndx_path, "w") as f:

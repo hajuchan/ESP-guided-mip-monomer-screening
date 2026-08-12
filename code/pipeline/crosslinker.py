@@ -76,13 +76,19 @@ def run_crosslinker_screening(
         except Exception:
             results = {}
 
-    def _cached(cl, sol):
-        return isinstance(results.get(cl), dict) and sol in results[cl]
+    def _cached(cl, sol, smi):
+        # SMILES-stamp guard: a cached entry computed for a different SMILES
+        # (e.g. TRIM's missing-CH2 fix) is stale and must recompute. Legacy
+        # entries with no stamp are trusted (skip) to preserve the DFT cache.
+        if not (isinstance(results.get(cl), dict) and sol in results[cl]):
+            return False
+        stored = results[cl][sol].get("smiles")
+        return stored in (None, smi)
 
     pending = [(cl, smi, sol, eps)
                for cl, smi in crosslinker_library.items()
                for sol, eps in solvents.items()
-               if not _cached(cl, sol)]
+               if not _cached(cl, sol, smi)]
     n_cached = n_tasks - len(pending)
 
     logger.info(
@@ -141,6 +147,7 @@ def run_crosslinker_screening(
             "bsse_dE": round(bsse_dE, 3),
             "assessment": assessment,
             "reason": reason,
+            "smiles": crosslinker_library.get(cl_name),  # SMILES-change guard
         }
 
     # ── Save merged JSON ────────────────────────────────────────────

@@ -283,3 +283,82 @@ def bleeding_risk(removal_success_rate: float = None,
             "Standard exhaustive washing (Soxhlet) expected sufficient; still "
             "verify no residual-template bleeding during rebinding."),
     }
+
+
+# ── GAP: template radical-chemistry compatibility ─────────────────────
+
+# Motifs that make a TEMPLATE interfere with free-radical (vinyl) polymerization
+# by scavenging the propagating radical or transferring chains — the network
+# fails to cure or the template is consumed. SMARTS + severity + mechanism.
+_RADICAL_INTERFERING_MOTIFS = [
+    ("bis-allylic 1,4-diene (H-atom donor / antioxidant, e.g. γ-terpinene)",
+     "[CX4;H1,H2]([#6]=[#6])[#6]=[#6]", "high"),
+    ("quinone (near-stoichiometric radical inhibitor)",
+     "[#6]1(=O)[#6]=[#6][#6](=O)[#6]=[#6]1", "high"),
+    ("phenol / hydroquinone / catechol (inhibitor, BHT-type)",
+     "[OX2H][cX3]", "high"),
+    ("thiol (strong chain-transfer agent)",
+     "[SX2H]", "high"),
+    ("aromatic amine / aniline (retarder)",
+     "[NX3;H1,H2][cX3]", "medium"),
+]
+
+
+def template_radical_compatibility(template_smiles: str) -> dict:
+    """Flag templates that INHIBIT or RETARD free-radical (vinyl) MIP synthesis.
+
+    Free-radical MIP relies on a chain-growth network forming AROUND the
+    template. If the template is itself a radical scavenger / chain-transfer
+    agent, it consumes the propagating radical instead — the resin never cures
+    (or the template is destroyed). γ-terpinene is the textbook case: its
+    1,4-cyclohexadiene bis-allylic C–H is readily abstracted (it is used as an
+    antioxidant / H-donor), so a MAA/EGDMA free-radical MIP of γ-terpinene fails
+    to imprint — matching the wet-lab observation that γ-terpinene "doesn't
+    stick" while methyl benzoate (no such motif) works.
+
+    Refs: Odian, *Principles of Polymerization* 4th ed. (inhibition, retardation,
+    chain transfer); Foti et al., J. Agric. Food Chem. 2007 (γ-terpinene H-atom
+    donation).
+
+    Returns {compatible_with_radical, severity, motifs, recommendation}.
+    """
+    try:
+        from rdkit import Chem
+    except Exception:
+        return {"compatible_with_radical": None, "severity": "unknown",
+                "motifs": [], "recommendation": "RDKit unavailable — not screened."}
+    mol = Chem.MolFromSmiles(template_smiles)
+    if mol is None:
+        return {"compatible_with_radical": None, "severity": "unknown",
+                "motifs": [], "recommendation": "Unparseable template SMILES."}
+
+    motifs, severity = [], "none"
+    for label, smarts, sev in _RADICAL_INTERFERING_MOTIFS:
+        patt = Chem.MolFromSmarts(smarts)
+        if patt is not None and mol.HasSubstructMatch(patt):
+            motifs.append({"motif": label, "severity": sev})
+            if sev == "high":
+                severity = "high"
+            elif severity != "high":
+                severity = "medium"
+
+    if severity == "high":
+        rec = ("Template is a radical scavenger / chain-transfer agent — a "
+               "free-radical (vinyl) MIP will be RETARDED or fail to cure. "
+               "Prefer a NON-radical route (sol-gel / silane monomers, or "
+               "electropolymerization), or use a structural-analog DUMMY template "
+               "lacking this motif. If the radical route is unavoidable: raise "
+               "initiator, deoxygenate thoroughly, and verify monomer conversion.")
+    elif severity == "medium":
+        rec = ("Template may retard free-radical polymerization — increase "
+               "initiator / cure time and verify conversion, or consider a "
+               "non-radical route or a dummy template.")
+    else:
+        rec = "No radical-interfering motif detected; free-radical MIP compatible."
+
+    return {
+        "compatible_with_radical": severity == "none",
+        "severity": severity,
+        "motifs": motifs,
+        "recommendation": rec,
+    }

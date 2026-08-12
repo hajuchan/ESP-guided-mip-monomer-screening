@@ -961,6 +961,7 @@ def _quantumdock_single(monomer_name: str, monomer_mol: Chem.Mol,
 
     return {
         "name": monomer_name,
+        "smiles": monomer_smiles,   # stamp for the SMILES-change cache guard
         "dE_hartree": opt_result["best_energy_hartree"],
         "dE_kcal": de,
         "success": True,
@@ -1000,15 +1001,25 @@ def run_stage1(template_smiles: str = None,
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     existing_results = []
-    existing_names = set()
     all_json = out_path / "stage1_all.json"
     if all_json.exists():
         with open(all_json) as f:
             existing_results = json.load(f)
-        existing_names = {r["name"] for r in existing_results if r.get("success")}
+
+    # SMILES-stamp guard: recompute a monomer whose cached entry was docked for a
+    # different SMILES (e.g. APB para→meta). Legacy entries with no stamp are
+    # trusted (skip) so the xTB cache isn't nuked wholesale — purge those by hand.
+    _existing_by_name = {r["name"]: r for r in existing_results if r.get("success")}
+
+    def _fresh(n, s):
+        r = _existing_by_name.get(n)
+        return r is not None and r.get("smiles") in (None, s)
 
     monomers_to_run = {n: s for n, s in monomer_library.items()
-                       if n not in existing_names}
+                       if not _fresh(n, s)}
+    # Drop stale entries we are about to recompute (avoid duplicate names).
+    existing_results = [r for r in existing_results
+                        if r.get("name") not in monomers_to_run]
     skip_count = len(monomer_library) - len(monomers_to_run)
     if skip_count > 0:
         logger.info(f"  {skip_count} monomers already computed, skipping")

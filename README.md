@@ -2,6 +2,8 @@
 
 Molecularly Imprinted Polymer(MIP) 합성을 위한 최적 functional monomer를 계산화학적으로 스크리닝하는 7-Stage 파이프라인.
 
+> **주요 업데이트 (2026)**: 다중 target 자동 실행(`--all-templates`, `MIP_TEMPLATE`) · CPU 워커 자동 사이징(코어 80% + RAM 상한, `MIP_WORKERS`) · VIP 전면 개편(50ns/10snap, Q4 평형 RMSD + 수렴 진단, residence+retention 연속 점수, `--reanalyze-vip`/`--extend-vip`, multi-restart, MM-GBSA) · Stage 7 결합-가중 랭킹 + 화학 일관성 필터 + inert 가교제 선택 · 실란 PolCA MD 지원 · GROMACS 2026.3 대응(tpx→.gro 폴백, maxwarn 50) · DFT GPU-OOM→CPU 자동 폴백.
+
 ---
 
 ## 파이프라인 전체 구조
@@ -39,22 +41,25 @@ Stage 4: MMSD 다중 monomer 조합 탐색
          └── 상위 3개 조합(PC) → stage4/mmsd_results.json
     ↓ 상위 3개 조합 (Stage 5 MD로)
 Stage 5: Pre-polymerization MD (GROMACS, GPU)
-         ├── GAFF2 parameterization (acpype) + 보론 B→C 치환
-         ├── Template + N×monomer + TIP3P water (MMSD 상위 3조합 각각 MD 검증)
+         ├── GAFF2 parameterization (acpype) + 보론 B→C 치환 + 실란 PolCA (Si, Jorge 2021)
+         ├── Template + N×monomer + cross-linker + 용매 (MMSD 상위 3조합 각각 MD 검증)
          ├── EM → NVT → NPT → 50ns Production MD
-         ├── Contact frequency, RDF, EBN, H-bond + SASA/FFV(형태학) 분석
+         ├── Contact frequency, RDF, EBN, H-bond + SASA/FFV(형태학) + MM-GBSA 분석
          └── 합성 비율 자동 결정 (EBN 정비례, Yuan 2024)
     ↓ N개 (필터 없음)
-Stage 6: VIP Cavity Rebinding (GROMACS)
-         ├── 균등 간격 3개 snapshot 선택 (cherry-picking 방지)
+Stage 6: VIP Cavity Rebinding (GROMACS) — BIO phase5 방식
+         ├── 균등 간격 10개 snapshot 선택 (cherry-picking 방지)
          ├── Monomer position restraint (1000 kJ/mol/nm²) → 중합 근사
          ├── Template removal test (10ns) → RMSD > 8Å = 이탈 성공
-         ├── Template rebinding MD (10ns) → RMSD < 5Å = cavity 인식 성공
-         ├── Interferent rebinding → graded selectivity 평가
-         └── VIP score = rebind_rate × (1 + selectivity)
+         ├── Template rebinding MD (50ns) → Q4 평형 RMSD + Q1→Q4 수렴 진단
+         ├── Residence(잔류시간) + 연속 retention 점수 → 약결합도 순위화
+         ├── 옵션: multi-restart 앙상블 · MM-GBSA ΔG · --reanalyze-vip/--extend-vip
+         └── VIP score = ½(retention + residence) × (1 + selectivity)
     ↓ VIP 순위
 Stage 7: 합성 레시피 자동 생성
-         ├── Top 조합 + cross-linker + porogen + 화학량론(Kass 기반 1:1/과잉)
+         ├── 모노머 랭킹 = |DFT 결합|×contact (결합-가중) → 승리 화학으로 필터(일관성)
+         ├── Cross-linker = 화학-호환 중 가장 inert(약결합, 예: EGDMA) → 비특이 자리 최소화
+         ├── Top 조합 + porogen + 화학량론(Kass 기반 1:1/과잉)
          ├── Chemistry-aware 보정: 이온화·자기회합·crosslinker 활성종·bleeding (문헌 감사)
          └── 화학별 프로토콜 (free-radical / sol-gel / oxidative) + Design considerations
 ```
@@ -102,6 +107,8 @@ Stage 1에서 찾은 최적 복합체 구조를 DFT 레벨에서 정밀 계산�
 
 **BSSE 보정**: Boys-Bernardi counterpoise를 **gas-phase에서** 수행 (PCM cavity 왜곡 방지).
 
+**GPU OOM 폴백**: 큰 분자(예: TRIM 가교제)가 GPU VRAM을 초과하면(`cudaError`) 동일 functional/basis로 **CPU에서 자동 재계산**한다 — 에너지 동일, 느리지만 완주. Stage 3 가교제 스크리닝에도 적용.
+
 **xTB→DFT 좌표 전달**: Stage 1의 `complex_coords`를 읽어 `prebuilt_complex_mol`로 DFT에 전달. 방향 문자열이 아닌 실제 좌표를 전달하여 PES 불일치 방지.
 
 **ESP 시각화**: 3D vdW 표면 ESP 맵 (plotly interactive HTML + publication-quality PNG). 복합체 상태의 ESP도 생성하여 결합 부위 확인 가능.
@@ -141,7 +148,7 @@ f_cavity = V_ratio^β (β=0.5)
 E_Int_eff = E_Int × f_cavity + α × max(V_template - V_interferent, 0)
 ```
 
-**Cross-linker 자동 추천**: Stage 3 실행 시 cross-linker DFT 스크리닝을 함께 수행. Template과 가장 약하게 결합하는 cross-linker를 추천 (좋은 cross-linker = template과 경쟁 안 함).
+**Cross-linker 자동 추천**: Stage 3 실행 시 cross-linker DFT 스크리닝을 함께 수행. Template과 가장 약하게 결합하는 cross-linker를 추천 (좋은 cross-linker = template과 경쟁 안 함). **항목별 캐시**: 완료된 (가교제×용매) 쌍은 skip, 실패분(예: TRIM OOM)만 재시도. 결과는 `features/crosslinker.json`에 공유 저장되어 Stage 7이 화학-호환 중 가장 inert한 것을 최종 선택.
 
 **필터링 없음**: 모든 monomer를 Stage 4로 전달. 선택도는 참고 지표로만 사용.
 
@@ -171,9 +178,13 @@ Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한
 **시스템 구성**:
 - GAFF2 force field (acpype Python API로 parameterization)
 - 보론산(B) 분자: B→C 치환 + 문헌 B 파라미터 (Gerogiokas 2020)
-- Template 1개 + Monomer 4개 + TIP3P 수용매
+- **실란(Si) monomer: PolCA organosilane force field** (Jorge 2021) — GAFF2엔 Si 없어 예전엔 skip했으나, 이제 Si0~Si4 LJ 파라미터로 MD 실행 (`_generate_silane_itp`)
+- Template 1개 + Monomer 4개 + cross-linker + 용매 (`MD_SOLVENT`: acetonitrile 또는 TIP3P water)
 - EM → NVT (1ns) → NPT (1ns) → 50ns Production MD (GROMACS GPU)
-- Checkpoint resume 지원 (`-cpi md.cpt -append`)
+- Checkpoint resume 지원 (`-cpi md.cpt -append`); 완료된 궤적은 skip, 분석만 재실행
+- **MM-GBSA ΔG** (gmx_MMPBSA, 옵션): 단일 pose 엔탈피와 전체 혼합물 자유에너지 사이의 앙상블 ΔG (`MD_MMPBSA`)
+
+**GROMACS 2026 대응**: 최신 GROMACS(2026.3)는 `.tpr`을 tpx v138로 저장하는데 설치된 MDAnalysis가 못 읽음 → `load_universe()`가 자동으로 `.gro`로 폴백(버전 무관). grompp 경고 다수(atomtype 재정의) → `-maxwarn 50`으로 흡수.
 
 **분석** (MDAnalysis):
 - Contact frequency (6Å cutoff): monomer가 template 근처에 머무는 빈도
@@ -190,31 +201,33 @@ Template + monomer의 동적 결합 행동을 MD 시뮬레이션으로 평가한
 
 Virtually Imprinted Polymer (VIP) 방식으로 실제 MIP cavity 형성과 rebinding을 시뮬레이션한다 (Zink & Moura, PCCP 2018). Stage 5 MD trajectory에서 snapshot을 선택한다.
 
-**프로토콜**:
-1. Stage 5 MD trajectory 후반 50%에서 **균등 간격 3개 snapshot** 선택
+**프로토콜** (형제 `Monomer_screening_in_Bio/phase5_rebinding.py` 이식):
+1. Stage 5 MD trajectory 후반 50%에서 **균등 간격 10개 snapshot** 선택
 2. Monomer position restraint (1000 kJ/mol/nm²) → 중합 근사
 3. **Template removal test** (10ns): template RMSD > 8Å → 이탈 성공 (제거 가능)
-4. **Rebinding MD** (10ns): template 5Å 변위 후 release, RMSD < 5Å → cavity 인식 성공
-5. **Interferent rebinding**: 각 interferent에 대해 동일 rebinding test
+4. **Rebinding MD** (50ns): template 5Å 변위 후 release → 아래 지표로 평가
+5. **Interferent rebinding**: 각 interferent에 대해 동일 test
 
-**VIP Scoring** (문헌 기반 재설계):
+**분석 지표 (BIO phase5 방식)**:
+- **Q4 평형 RMSD**: 마지막 25% 궤적 평균 — 느린 binding/unbinding kinetics에 강건 (단일 final frame 대신)
+- **Q1→Q4 수렴 진단**: drift > 1.5Å면 "미수렴" 경고 → rebind 실패가 진짜인지 샘플링 부족인지 판별
+- **Residence(잔류시간)**: cavity(≤removal 임계) 내 머문 프레임 비율 — 결국 이탈해도 "얼마나 버텼나"로 약결합 monomer 구별
+- **연속 retention 점수**: Q4 RMSD를 [0,1]로 등급화 (retained ≤5Å → 1, escaped ~16Å → 0)
+- (옵션) **MM-GBSA ΔG** (rebinding별 결합자유에너지, `VIP_MMPBSA`), **multi-restart 앙상블** (`VIP_N_RESTARTS`회 perturbed 평균)
+
+**VIP Scoring** (연속·잔류 기반):
 ```
-VIP score = rebind_rate × (1 + selectivity)
+VIP score = ½ × (retention + residence) × (1 + selectivity)
 ```
+- 이진 rebind(0/1)은 약결합 template에서 전부 0이라 순위 불가 → **연속 retention + residence**로 대체 (BIO)
+- residence 덕에 다 이탈해도 "오래 버틴 monomer"가 위로 옴
+- selectivity: graded — `1 - mean(interf/template Q4-RMSD 비)` (interferent 있을 때)
 
-- **rebind_rate**: template이 cavity로 되돌아오는 비율 (primary metric, Zink 2018)
-- **selectivity**: graded scoring — `1 - mean(interf_rebind_rate / template_rebind_rate)`
-  - interferent가 template만큼 rebinding하면 sel ≈ 0 (비선택적)
-  - interferent가 template보다 덜 rebinding하면 sel > 0 (선택적)
-- **Fallback**: removal이 작동하는 큰 template에서는 `both_rate × (1 + selectivity)` 사용
+**재분석 / 연장 (MD 재실행 없이)**:
+- `--reanalyze-vip`: 기존 궤적에서 Q4/residence/retention/ΔG 재계산 → 새 지표를 옛 run에 즉시 적용 (수 초)
+- `--extend-vip`: 미수렴(drift>1.5Å) rebinding MD만 checkpoint에서 연장 후 재분석
 
-**Scoring 설계 근거:**
-
-원래 VIP score는 `both_rate (removal AND rebinding)` 기반이었으나, 소분자 template(hexanal 등)에서는 10ns MD 내에 8Å 이상 이탈이 거의 발생하지 않아 removal_rate ≈ 0이 됨. Zink 2018 원논문은 17β-estradiol(272Å³, 복잡한 스테로이드)을 사용했기 때문에 removal이 잘 작동했으나, 직쇄형 알데히드(115Å³)에서는 한계가 있음.
-
-또한 소분자 cavity에서는 **shape selectivity가 약함** — 더 작은 interferent(acetic acid 57Å³, ethanol 54Å³)가 hexanal cavity에 쉽게 들어가므로 RMSD 기반 binary selectivity는 차별력이 부족함. 따라서 graded selectivity로 변경.
-
-소분자 template의 경우, **화학적 상호작용** (H-bond, 정전기)이 cavity shape보다 selectivity에 더 중요하며, 이는 Stage 3의 DFT selectivity로 보완됨.
+**설계 근거**: 원래 score는 `rebind_rate(0/1)` 기반이었으나 소분자·무극성 template에서는 10ns 내 되붙기(diffusion-limited)가 샘플링 불가 → 전부 rebind=0으로 순위가 안 나옴. Zink 2018은 17β-estradiol(272Å³)을 썼으나 gamma-terpinene 같은 무극성체는 인식이 약해 shape/dispersion 위주라 더 그렇다. 그래서 (1) 샘플링 강화(50ns/10snap), (2) 수렴 진단, (3) 연속 retention+residence로 재설계했다. 무극성 template의 인식은 cavity shape이 주도하는데 파이프라인이 이 축을 못 잡으므로, 최종 IF는 실험으로 검증할 것을 권장한다.
 
 **구현 세부사항**:
 - Template/monomer 식별: resid 기반 (첫 번째 non-solvent residue = template)
@@ -225,6 +238,12 @@ VIP score = rebind_rate × (1 + selectivity)
 **파일**: `code/pipeline/stage7_recipe.py`, `code/pipeline/chemistry_aware.py`
 
 Stage 6 VIP 순위, Stage 5 합성 비율, Stage 4 MMSD 조합, Stage 3 cross-linker/porogen 추천을 종합하여 합성 프로토콜을 자동 생성한다. 중합 방식(free-radical/sol-gel/oxidative)에 맞는 프로토콜을 출력한다.
+
+**모노머 랭킹 (결합-가중)**: 랭킹 소스는 VIP(6) → MD(5) → Stage 3 순으로 캐스케이드. MD 단계는 **`|DFT 결합에너지| × contact_freq`**로 순위를 매긴다 — contact_freq 단독은 희박한 프레임에서 노이즈가 커서, 실제로 안 붙는데 얼쩡거리기만 하는 비결합체(예: VIM, DFT≈0)가 강결합체(NVP) 위로 올라가는 문제가 있어 DFT 친화도로 가중한다.
+
+**화학 일관성 필터**: best_monomer는 **승리 중합 화학(MMSD 조합)에 맞는 monomer로 필터**된다. 안 그러면 MD contact 랭킹이 피롤(산화중합)을 1위로 올려도 프로토콜은 free-radical+AIBN이라 **화학적으로 불가능한 레시피**가 나온다. 필터로 monomer·프로토콜·가교제가 한 화학으로 일관된다.
+
+**Cross-linker = 가장 inert(약결합)**: 가교제는 ~80% 대량이라 template에 결합하면 매트릭스 전체에 비특이 자리를 만들어 IF를 낮춘다 (Shoravi/Olsson 2014). 따라서 **화학-호환 가교제 중 template에 가장 약하게 결합하는 것**(DFT 스크리닝, 예: vinyl → EGDMA)을 고른다 — MMSD가 total-binding 최적화로 고른 강결합 가교제가 아니라.
 
 **Chemistry-aware 보정** (`chemistry_aware.py`, 문헌 감사 반영 — 검증된 8 gap 중 6개):
 - **화학량론 (GAP 4+6)**: 결합에너지 → Kass 추정 → Kass>900 M⁻¹면 1:1 화학량론, 아니면 과잉 monomer. 고정 1:4 대체 (Wulff & Knorr 2001).
@@ -256,43 +275,50 @@ Stage 6 VIP 순위, Stage 5 합성 비율, Stage 4 MMSD 조합, Stage 3 cross-li
 ## 실행 방법
 
 ```bash
-conda activate MIPscreen
+conda activate MIPscreen              # 또는 사용 중인 env
 source /usr/local/gromacs-gpu/bin/GMXRC
 cd MIP_simulation
 
-# config.py에서 TEMPLATE_NAME(TEMPLATES 중 선택), MONOMER_LIBRARY 설정 후:
-
 # 전체 파이프라인 (Stage 1→2→3→4→5→6→7)
-# --output-dir 생략 시 자동으로 results/<TEMPLATE_NAME>/stage1..stage7 에 저장
-# 이미 완료된 stage(출력 파일 존재)는 자동으로 건너뜀 → 중단 후 재실행하면 이어서 진행
+# 결과는 실행 위치 무관하게 results/<TEMPLATE_NAME>/stage1..7 에 저장.
+# 이미 완료된 항목(monomer/solvent/조합)은 item-level로 자동 skip → 중단 후 이어서 진행.
 python run_pipeline.py --stage all
-#   → results/Gamma-terpinene/stage1, .../stage2, ...
-
-# 완료된 stage도 강제로 다시 실행
-python run_pipeline.py --stage all --force
-
-# 출력 위치 직접 지정도 가능
-python run_pipeline.py --stage all --output-dir results/g_terpinene
 
 # 개별 Stage (1 xTB, 2 DFT, 3 porogen+선택도, 4 MMSD, 5 MD, 6 VIP, 7 recipe)
-python run_pipeline.py --stage 1 --output-dir results/g_terpinene
-python run_pipeline.py --stage 4 --output-dir results/g_terpinene   # MMSD 조합 탐색
-python run_pipeline.py --stage 5 --output-dir results/g_terpinene   # MD
-python run_pipeline.py --stage 6 --output-dir results/g_terpinene   # VIP
+python run_pipeline.py --stage 5      # MD
+python run_pipeline.py --stage 6      # VIP
+python run_pipeline.py --stage 7      # 레시피
 
-# Template override (SMILES만 교체; TEMPLATE_NAME은 config 유지)
-python run_pipeline.py --template "CC(=O)O" --stage all --output-dir results/acetic_acid
+# ── 다중 Target ──
+# config.TEMPLATES 전부 순차 실행 (target별 subprocess 격리 → results/<name>/ 분리)
+python run_pipeline.py --all-templates --stage all
+# 특정 target만 env로 선택 (config 안 고치고)
+MIP_TEMPLATE="Methyl Benzoate" python run_pipeline.py --stage all
 
-# 추가 기능
-python run_pipeline.py --crosslinker --output-dir results/g_terpinene
-python run_pipeline.py --suggest-interferents
-python run_pipeline.py --auto-interferents
-python run_pipeline.py --report --output-dir results/g_terpinene
-python run_pipeline.py --predict-if --output-dir results/g_terpinene
+# ── 자원 튜닝 (환경변수) ──
+# 워커 수는 기본 자동(코어 80%, 가용 RAM 상한). OOM 나면 낮추기:
+MIP_WORKERS=2 python run_pipeline.py --all-templates --stage all
+#   MIP_WORKERS=<n> 직접 지정 / MIP_RAM_PER_WORKER_GB=2.0 RAM 예산 / MIP_GPU_WORKERS=<n>
 
-# 실험 IF 데이터 업데이트
+# ── VIP 재분석/연장 (MD 재실행 없이) ──
+python run_pipeline.py --reanalyze-vip     # 기존 궤적 → Q4/residence/retention/ΔG 재계산
+python run_pipeline.py --extend-vip         # 미수렴 rebinding MD만 연장 후 재분석
+
+# ── 강제 재계산 ── (--force는 Stage 4 MMSD만; 다른 stage는 해당 출력 폴더 삭제)
+python run_pipeline.py --stage 4 --force
+
+# ── 추가 기능 ──
+python run_pipeline.py --crosslinker           # 가교제 스크리닝 (항목별 캐시)
+python run_pipeline.py --report                # HTML 리포트
+python run_pipeline.py --suggest-interferents  # / --auto-interferents
+python run_pipeline.py --predict-if
 python run_pipeline.py --update-if-model --monomer MAA --experimental-if 15
+
+# 장시간 실행은 백그라운드 권장 (fresh target의 Stage 1 xTB는 수 시간~하루)
+nohup python run_pipeline.py --all-templates --stage all > all.log 2>&1 &
 ```
+
+**환경변수 요약**: `MIP_TEMPLATE`(활성 target) · `MIP_WORKERS`(CPU 워커, 0/미설정=자동) · `MIP_GPU_WORKERS` · `MIP_RAM_PER_WORKER_GB`(워커당 RAM 예산). 전체 플래그는 루트 `run_pipeline.py` docstring 또는 `--help` 참조.
 
 ### 디렉토리 구조
 
@@ -343,8 +369,10 @@ MIP_simulation/
 | Interferents | 없음 (이번 스크리닝 비활성 — Stage 3는 결합에너지 랭킹으로 대체) |
 | Solvents (porogen 후보) | Chloroform (ε=4.71), Acetonitrile (ε=35.69), Toluene (ε=2.38) |
 | Porogen 전략 | `global_optimal` — 전역 최적 porogen 1개 자동 선택·고정 |
-| Cross-linker | vinyl: EGDMA·DVB·TRIM·BAM / silane: TEOS·TMOS |
-| Workers | 11 (CPU), 1 (GPU) |
+| Cross-linker | vinyl: EGDMA·DVB·TRIM·BAM / silane: TEOS·TMOS — 레시피는 **화학-호환 중 가장 inert(약결합)** 자동 선택 |
+| Workers (CPU) | **자동** — 코어의 80%, 가용 RAM 상한(워커당 ~2GB). `MIP_WORKERS`로 오버라이드 |
+| Workers (GPU) | 1 (VRAM 제한). `MIP_GPU_WORKERS`로 오버라이드 |
+| VIP 샘플링 | 10 snapshot × 50ns rebinding (`VIP_N_SNAPSHOTS`, `VIP_REBINDING_NS`); 옵션 `VIP_N_RESTARTS`·`VIP_MMPBSA` |
 
 ---
 
@@ -369,11 +397,12 @@ MIP_simulation/
 | 5 | 보론 파라미터 | B→C 치환 + 문헌값 | Gerogiokas 2020 |
 | 5 | MD 시간 | 50 ns | 평형 도달 |
 | 5 | Template:monomer 비율 | 1:4 | 고정 |
-| 6 | Snapshot | 균등 간격 3개 | Cherry-picking 방지 (Zink 2018) |
+| 6 | Snapshot | 균등 간격 10개 | 통계력 (BIO phase5) |
+| 6 | Rebinding MD | 50 ns + Q4 평형 RMSD | 느린 kinetics 대응 + Q1→Q4 수렴 진단 |
 | 6 | Position restraint | 1000 kJ/mol/nm² | 중합 근사 |
-| 6 | Rebinding 기준 | RMSD < 5 Å | Cavity 인식 성공 |
+| 6 | Rebinding 기준 | Q4 RMSD < 5 Å | Cavity 인식 성공 |
 | 6 | Removal 기준 | RMSD > 8 Å | Template 이탈 (제거 가능) |
-| 6 | Scoring | rebind_rate × (1 + graded selectivity) | 소분자 template 최적화 |
+| 6 | Scoring | ½(retention + residence) × (1 + selectivity) | 연속·잔류 기반 (약결합도 순위화) |
 
 ---
 
@@ -431,7 +460,7 @@ gmx --version
 | GPU | CUDA 지원 NVIDIA | RTX 4070 Ti+ (12GB+ VRAM) |
 | CPU | 8코어 | 16코어 |
 | RAM | 16GB | 32GB |
-| GROMACS | 2023+ (GPU build) | 2025.2 |
+| GROMACS | 2023+ (GPU build) | 2025.2 (2026.3 호환: tpx→.gro 폴백·maxwarn 자동) |
 | Python | 3.11 | 3.11 (tblite 호환) |
 
 ---
@@ -447,8 +476,13 @@ gmx --version
 | ddCOSMO GPU gradient 미지원 | gpu4pyscf 제한 | PCM (IEF-PCM)으로 대체 |
 | 보론산 GAFF2 파라미터 부재 | GAFF2에 B 파라미터 없음 | B→C 치환 + 문헌 파라미터 (Gerogiokas 2020) |
 | H-bond 분석 0건 | 축약 trajectory + 단방향 분석 | 전체 trajectory + bidirectional + TPR topology |
-| VIP score 전부 0 | 소분자 template 10ns 내 8Å 이탈 불가 (removal_rate=0) | rebind_rate를 primary metric으로 변경 (both_rate fallback) |
-| VIP selectivity ≈ 0 | 소분자 interferent가 cavity에 쉽게 진입 (RMSD binary 판정) | graded selectivity: `1 - mean(interf/template rebind ratio)` |
+| VIP score 전부 0 | 약결합 template은 10ns 내 재결합(diffusion-limited) 샘플링 불가 → 이진 rebind 전부 0 | 연속 **retention + residence** 점수로 재설계 + 50ns/10snap + Q4 평형·수렴 진단 (BIO phase5) |
+| 실란(Si) monomer MD 불가 | GAFF2에 Si 파라미터 없음 | **PolCA organosilane** force field (Jorge 2021, `_generate_silane_itp`) |
+| MDAnalysis "tpx version 138" | GROMACS 2026.3 .tpr가 최신 tpx → 설치된 MDAnalysis 미지원 | `load_universe()`가 .gro topology로 자동 폴백 (버전 무관) |
+| grompp "Too many warnings (12)" | GROMACS 2026.3이 atomtype 재정의 경고 다수 | 모든 grompp `-maxwarn 50` (무해 경고 흡수) |
+| DFT GPU OOM (큰 분자, TRIM 등) | def2-TZVP가 GPU VRAM 초과 (cudaError) | **CPU로 자동 폴백** (동일 basis/에너지, 느림) |
+| acpype 전멸 (antechamber 못 찾음) | launcher가 PATH 벗겨 AmberTools 안 보임 | subprocess에 conda bin PATH 주입(`_tool_env`) + preflight 체크 |
+| 전체 target `rc=-9` (SIGKILL) | 시스템 RAM 고갈 (고아 프로세스 / 워커 과다) | 워커 자동 사이징(RAM 상한) + `pkill` 정리, `MIP_WORKERS`로 하향 |
 
 ---
 

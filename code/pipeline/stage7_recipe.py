@@ -33,6 +33,23 @@ _CHEM_DEFAULT_XL = {"free-radical": "EGDMA", "sol-gel": "TEOS", "oxidative": Non
 _CHEM_TO_MONO_POLY = {"free-radical": "vinyl", "sol-gel": "silane", "oxidative": "oxidative"}
 
 
+def _canon_chemistry(chem):
+    """Normalize Stage-4's verbose `synthesis_method` (e.g.
+    'oxidative/electro-polymerization') to the canonical protocol key used by
+    _CHEM_TO_XL_POLY / _CHEM_TO_MONO_POLY / the radical gate. Without this,
+    oxidative combos fall through to the default 'vinyl' path and get a
+    contradictory EGDMA crosslinker (stage4 writes the long form; these dicts
+    key on the short form)."""
+    c = str(chem or "").lower()
+    if c.startswith("oxidative") or "electro" in c:
+        return "oxidative"
+    if "sol-gel" in c or "silane" in c:
+        return "sol-gel"
+    if "radical" in c or "vinyl" in c:
+        return "free-radical"
+    return chem or "free-radical"
+
+
 def _classify_polymerization(smi):
     """Si→silane, non-aromatic C=C→vinyl, else oxidative
     (mirrors stage4_mmsd._detect_polymerization)."""
@@ -58,6 +75,39 @@ def _xl_polymerization(name):
 
 def _mono_polymerization(name):
     return _classify_polymerization(MONOMER_LIBRARY.get(name, ""))
+
+
+# Radical monomer/crosslinker families for reactivity-ratio matching. A
+# crosslinker copolymerises efficiently only with monomers of a compatible
+# reactive group (methacrylate↔dimethacrylate EGDMA/TRIM; styrenic↔DVB;
+# acrylamide↔bisacrylamide BAM). N-vinyl monomers (NVP/VIM) have r≈0 and
+# incorporate poorly with any of these. Order matters (methacrylate before
+# acrylate). Ref: Odian, *Principles of Polymerization* (reactivity ratios).
+_RADICAL_FAMILY_SMARTS = [
+    ("methacrylate", "[CH2]=[CX3]([CH3])[CX3]=O"),
+    ("styrenic",     "[CX3]=[CX3]c"),
+    ("acrylamide",   "[CH2]=[CH][CX3](=O)[NX3]"),
+    ("acrylate",     "[CH2]=[CH][CX3](=O)[OX1,OX2]"),
+    ("n-vinyl",      "[CH2]=[CH][#7]"),   # vinyl on N (NVP; incl. aromatic n: VIM)
+]
+
+
+def _radical_family(smi):
+    """Radical copolymerization family of a monomer/crosslinker SMILES (or None)."""
+    if not smi:
+        return None
+    try:
+        from rdkit import Chem
+        m = Chem.MolFromSmiles(smi)
+        if m is None:
+            return None
+        for fam, sm in _RADICAL_FAMILY_SMARTS:
+            patt = Chem.MolFromSmarts(sm)
+            if patt is not None and m.HasSubstructMatch(patt):
+                return fam
+    except Exception:
+        return None
+    return None
 
 
 def _dft_bindings(base, solvent):
@@ -88,42 +138,132 @@ def _dft_bindings(base, solvent):
     return out
 
 
-def _select_crosslinker(base, chemistry, mmsd_xl=None):
-    """Pick the most INERT crosslinker compatible with the winning chemistry.
+def _wash_solvent(template_smiles, template_name):
+    """Choose a template-removal wash matched to the TEMPLATE chemistry, and
+    never the template itself. A fixed MeOH/AcOH wash (a) fails to elute a
+    nonpolar terpene template (MeOH barely dissolves it) and (b) is self-defeating
+    when the template IS acetic acid (the wash reintroduces the analyte, so the
+    FT-IR removal QC can never pass). Returns (wash, note)."""
+    from . import chemistry_aware as _ca
+    try:
+        ion = _ca.detect_ionizable(template_smiles) or []
+    except Exception:
+        ion = []
+    name = (template_name or "").lower()
+    smi = template_smiles or ""
+    is_acid = any(g in ion for g in ("carboxyl", "sulfonic_acid", "boronic_acid"))
+    is_base = any(g in ion for g in ("primary_amine", "secondary_amine",
+                                     "pyridine_N", "imidazole_N"))
+    template_is_acetic = ("acetic" in name) or smi in ("CC(=O)O", "CC(O)=O", "OC(C)=O")
+    polar = any(c in smi for c in ("O", "N", "S", "n", "o", "s"))
+    if is_acid:
+        acid = "formic acid" if template_is_acetic else "acetic acid"
+        note = (f"acidic template — protic MeOH/{acid} competes the H-bonds"
+                + ("; AcOH avoided (it is the template)" if template_is_acetic else ""))
+        return f"MeOH/{acid} (9:1)", note
+    if is_base:
+        return "MeOH + 1% NH₃(aq)", "basic template — mildly basic MeOH wash breaks ionic H-bonds"
+    if polar:
+        return "MeOH (Soxhlet)", "polar template — hot MeOH disrupts the H-bond complex"
+    return ("acetone or ethanol (Soxhlet), or the polymerization porogen",
+            "nonpolar template — MeOH extracts poorly; use acetone/ethanol or the "
+            "porogen to dissolve and elute the template")
+
+
+def _combination_ratio(base, method):
+    """Mixture-based synthesis ratio from the TOP combination MD: each monomer's
+    per-type EBN (max simultaneous template binding) measured WHILE the monomers
+    are co-present, mapped resname→name via the combo's resname_map. This is the
+    Yuan 2024 EBN ratio, but read from the ACTUAL mixture (competition included)
+    instead of each monomer in isolation. If EBN is degenerate across types (all
+    equal — e.g. every type hit the copy cap), fall back to the continuous
+    per-type contact frequency so the ratio still discriminates.
+
+    method 'ebn'/other      → more sites ⇒ more copies (Yuan 2024, direct).
+    method 'contact_inverse'→ weaker ⇒ more copies (compensation).
+    Returns ({name: ratio}, method_str) or (None, None) when there is no genuine
+    multi-monomer combination MD to read (→ caller falls back to single-monomer)."""
+    p = base / "stage5" / "stage5_combination.json"
+    if not p.exists():
+        return None, None
+    try:
+        combos = json.load(open(p))
+    except Exception:
+        return None, None
+    if not isinstance(combos, list) or not combos:
+        return None, None
+    per = (combos[0].get("md_analysis") or {}).get("per_monomer") or {}
+    rmap = combos[0].get("resname_map") or {}
+    ebn, cf = {}, {}
+    for rn, d in per.items():
+        name = rmap.get(rn, rn)
+        d = d or {}
+        ebn[name] = int(d.get("ebn_max", 0) or 0)
+        cf[name] = float(d.get("contact_frequency", 0.0) or 0.0)
+    names = [n for n in ebn if ebn[n] > 0 or cf[n] > 0]
+    if len(names) < 2:
+        return None, None               # not a real multi-monomer mixture
+    # Prefer EBN; use contact only if EBN can't tell the types apart.
+    use_ebn = len({ebn[n] for n in names}) > 1 and all(ebn[n] > 0 for n in names)
+    sig = {n: (ebn[n] if use_ebn else cf[n]) for n in names}
+    basis = "EBN" if use_ebn else "contact"
+    if method == "contact_inverse":
+        mx = max(sig.values())
+        return ({n: round(mx / v, 1) for n, v in sig.items()},
+                f"inverse mixture {basis} (combination MD)")
+    mn = min(sig.values())
+    return ({n: max(1, round(v / mn)) for n, v in sig.items()},
+            f"direct mixture {basis} (combination MD, Yuan 2024 EBN)")
+
+
+def _select_crosslinker(base, chemistry, mmsd_xl=None, best_monomer=None):
+    """Pick the most INERT crosslinker compatible with the winning chemistry AND
+    reactivity-matched to the best monomer.
 
     A crosslinker is used in large excess (~80 %, T:XL ≈ 1:20); if it binds the
     template it seeds NON-SPECIFIC sites throughout the whole matrix (not just
     the imprinted cavity), raising NIP binding and LOWERING the imprinting factor
-    (Shoravi/Olsson 2014). So the correct criterion is the WEAKEST template
-    binding among chemistry-compatible crosslinkers — deliberately NOT MMSD's
-    pick, whose total-binding optimisation rewards a strongly-binding crosslinker
-    (exactly the wrong thing). EGDMA is the textbook inert free-radical choice.
-    Oxidative polymers self-crosslink → returns (None, reason)."""
+    (Shoravi/Olsson 2014). So the criterion is the WEAKEST template binding among
+    chemistry-compatible crosslinkers — deliberately NOT MMSD's pick. Among those,
+    prefer the crosslinker in the SAME radical family as the monomer (reactivity
+    ratio: methacrylate↔EGDMA/TRIM, styrenic↔DVB, acrylamide↔BAM) so it actually
+    copolymerises. Oxidative polymers self-crosslink → returns (None, reason)."""
     need = _CHEM_TO_XL_POLY.get(chemistry, "vinyl")
     if need is None:                       # oxidative → no molecular crosslinker
         return None, "oxidative self-crosslinking (no molecular crosslinker)"
 
-    # 1) most inert COMPATIBLE crosslinker from the full DFT screening
-    #    (least-negative avg ΔE = least template competition = fewest non-specific sites)
+    fam = _radical_family(MONOMER_LIBRARY.get(best_monomer, "")) if best_monomer else None
+    warn = ""
+    if fam == "n-vinyl":
+        warn = (f"; NOTE: {best_monomer} is N-vinyl (r≈0) — it copolymerises poorly "
+                f"with (meth)acrylate/styrenic crosslinkers; expect low incorporation, "
+                f"consider a reactivity-matched divinyl or a redox/low-T initiator")
+
+    # 1) compatible crosslinkers from the DFT screening, ranked by inertness
     feat = base / "features" / "crosslinker.json"
     if feat.exists():
         try:
             data = json.load(open(feat))
-            best, best_be = None, float("-inf")
+            cands = {}                      # name -> avg template ΔE (higher = more inert)
             for name, solvs in data.items():
                 if _xl_polymerization(name) != need:
                     continue
                 bes = [v.get("bsse_dE", v.get("raw_dE")) for v in solvs.values()
                        if isinstance(v, dict) and
                        (v.get("bsse_dE") is not None or v.get("raw_dE") is not None)]
-                if not bes:
-                    continue
-                avg = sum(bes) / len(bes)
-                if avg > best_be:           # weakest (least negative) wins
-                    best_be, best = avg, name
-            if best:
-                return best, (f"most inert compatible — weakest template binding "
-                              f"(avg ΔE={best_be:+.3f} kcal/mol) minimises non-specific sites")
+                if bes:
+                    cands[name] = sum(bes) / len(bes)
+            if cands:
+                # prefer the same reactive family; within the pool, most inert wins
+                same = {n: v for n, v in cands.items()
+                        if fam and _radical_family(CROSSLINKER_LIBRARY.get(n, "")) == fam}
+                pool = same or cands
+                best = max(pool, key=pool.get)
+                match = (f", reactivity-matched to the {fam} monomer" if same else
+                         (f" (no {fam}-family crosslinker in library; reactivity ratio "
+                          f"may be suboptimal)" if fam else ""))
+                return best, (f"most inert compatible{match} — weakest template binding "
+                              f"(avg ΔE={pool[best]:+.3f} kcal/mol){warn}")
         except Exception:
             pass
 
@@ -133,12 +273,13 @@ def _select_crosslinker(base, chemistry, mmsd_xl=None):
         try:
             rec = json.load(open(cl_path)).get("recommended")
             if rec and _xl_polymerization(rec) == need:
-                return rec, "Stage 3 screening (weakest-binding, compatible)"
+                return rec, f"Stage 3 screening (weakest-binding, compatible){warn}"
         except Exception:
             pass
 
     # 3) per-chemistry default (standard inert crosslinker)
-    return _CHEM_DEFAULT_XL.get(chemistry, "EGDMA"), "per-chemistry default (standard inert crosslinker)"
+    return (_CHEM_DEFAULT_XL.get(chemistry, "EGDMA"),
+            f"per-chemistry default (standard inert crosslinker){warn}")
 
 
 def run_stage7(output_dir: str = None) -> dict:
@@ -168,44 +309,46 @@ def run_stage7(output_dir: str = None) -> dict:
         "solvent": solvent,
     }
 
-    # ── Load VIP results (Stage 6) or MD (Stage 5) ──
+    # ── Combination-centric ranking ──
+    # The recipe centers on the best COMBINATION (Stage-5 combination MD, sorted by
+    # mixture contact; Stage-6 VIP validates its cavity). best_monomer = the
+    # combination's DOMINANT monomer (highest mixture contact); the co-monomer feed
+    # comes from the mixture ratio. Falls back to the Stage-3 per-monomer ranking.
     vip_path = base / "stage6" / "stage6_vip.json"
-    s4_path = base / "stage5" / "stage5_md.json"
+    s4_path = base / "stage5" / "stage5_md.json"   # legacy single-monomer (usually absent)
 
-    # Rank monomers, cascading through the richest available source.
+    combos = []
+    s5c_path = base / "stage5" / "stage5_combination.json"
+    if s5c_path.exists():
+        try:
+            combos = [c for c in json.load(open(s5c_path))
+                      if isinstance(c, dict) and c.get("md_analysis")]
+        except Exception:
+            combos = []
+    best_combo = combos[0] if combos else None     # stage5 sorts by mixture contact
+
     monomer_ranking, src = [], None
-    if vip_path.exists():
-        vip = json.load(open(vip_path))
-        ranked = [(m, d.get("vip_score", 0)) for m, d in vip.items()
-                  if isinstance(d, dict) and d.get("vip_score", 0) > 0]
-        ranked.sort(key=lambda x: -x[1])
-        if ranked:
-            monomer_ranking, src = ranked, "Stage 6 VIP"
-    if not monomer_ranking and s4_path.exists():
-        s4 = json.load(open(s4_path))
-        if isinstance(s4, list):
-            # Rank by binding-weighted contact = |DFT ΔE| × contact_freq. Raw
-            # contact frequency alone (sparse frames, values clustered) can rank
-            # a DFT non-binder that merely lingers (e.g. VIM: contact 0.44 but
-            # DFT −0.14) above a genuine strong binder (NVP: −6.9). Weighting by
-            # DFT affinity keeps the MD validation but demands real binding.
-            dft_be = _dft_bindings(base, solvent)
-            ranked = []
-            for r in s4:
-                m, cf = r.get("monomer"), r.get("contact_frequency", 0)
-                if not m or cf <= 0:
-                    continue
-                affinity = max(0.0, -dft_be.get(m, 0.0))  # attractive ΔE only
-                ranked.append((m, round(affinity * cf, 4)))
-            ranked.sort(key=lambda x: -x[1])
-            if any(s > 0 for _, s in ranked):
-                monomer_ranking = ranked
-                src = "Stage 5 MD contact × DFT affinity"
-            elif ranked:  # no DFT data → fall back to raw contact frequency
-                ranked = sorted(((r["monomer"], r.get("contact_frequency", 0))
-                                 for r in s4 if r.get("contact_frequency", 0) > 0),
-                                key=lambda x: -x[1])
-                monomer_ranking, src = ranked, "Stage 5 MD (contact frequency)"
+    if best_combo:
+        per = (best_combo.get("md_analysis") or {}).get("per_monomer") or {}
+        rmap = best_combo.get("resname_map") or {}
+        ranked = sorted(((rmap.get(rn, rn), (d or {}).get("contact_frequency", 0.0))
+                         for rn, d in per.items()), key=lambda x: -x[1])
+        monomer_ranking = [(m, s) for m, s in ranked if m in MONOMER_LIBRARY]
+        src = "Stage 5 combination MD (mixture contact)"
+        recipe["recommended_combination"] = best_combo.get("selected", [])
+        _lbl = ("+".join(best_combo.get("selected", []))
+                or f"pc{best_combo.get('rank')}")
+        if vip_path.exists():                       # VIP validation of the cavity
+            try:
+                _v = json.load(open(vip_path)).get(_lbl, {})
+                if isinstance(_v, dict) and _v.get("vip_score") is not None:
+                    recipe["combination_vip"] = {
+                        "label": _lbl, "vip_score": _v.get("vip_score"),
+                        "removal_rate": (_v.get("removal_rate")
+                                         or _v.get("removal_success_rate"))}
+                    src = "Stage 5 combination MD + Stage 6 VIP"
+            except Exception:
+                pass
     if not monomer_ranking:
         s3_path = base / "stage3" / "stage3_top.json"
         if s3_path.exists():
@@ -235,6 +378,9 @@ def run_stage7(output_dir: str = None) -> dict:
                 mmsd_xl = _t[0].get("crosslinker")
         except Exception:
             pass
+    # Normalize to the canonical key so _CHEM_TO_XL_POLY / _CHEM_TO_MONO_POLY /
+    # the radical gate all match (stage4 stamps the verbose form).
+    chemistry = _canon_chemistry(chemistry)
 
     # Keep only monomers whose polymerization matches the winning chemistry, so
     # best_monomer agrees with the protocol and crosslinker.
@@ -261,19 +407,28 @@ def run_stage7(output_dir: str = None) -> dict:
     ]
 
     recipe["polymerization"] = chemistry
+    best_monomer = top3[0][0] if top3 else "MAA"
 
-    # ── Cross-linker (must match the polymerization chemistry) ──
-    xl_name, xl_reason = _select_crosslinker(base, chemistry, mmsd_xl)
+    # ── Cross-linker (chemistry-compatible + reactivity-matched to best monomer) ──
+    xl_name, xl_reason = _select_crosslinker(base, chemistry, mmsd_xl,
+                                             best_monomer=best_monomer)
     recipe["crosslinker"] = xl_name
     recipe["crosslinker_smiles"] = (
         CROSSLINKER_LIBRARY.get(xl_name, "") if xl_name else "")
     recipe["crosslinker_source"] = xl_reason
 
     # ── Synthesis ratio ──
-    # EBN-based (Yuan et al. 2024): more simultaneous binding sites (EBN↑) →
-    # more monomer copies (direct proportion). Optional: inverse contact freq.
+    # PREFER the mixture-based ratio: each monomer's template engagement measured
+    # in Stage 4's actual combination (combination MD, monomers co-present), so
+    # competition between co-monomers is reflected. Fall back to single-monomer
+    # EBN (Yuan 2024 — each monomer in isolation), then a fixed 1:4 default.
     from .config import MD_RATIO_METHOD
-    if s4_path.exists():
+    combo_ratios, combo_method = _combination_ratio(base, MD_RATIO_METHOD)
+    if combo_ratios:
+        recipe["synthesis_ratios"] = combo_ratios
+        recipe["ratio_method"] = combo_method
+        recipe["ratio_basis"] = "combination (mixture)"
+    elif s4_path.exists():
         s4 = json.load(open(s4_path))
         if isinstance(s4, list):
             if MD_RATIO_METHOD == "ebn":
@@ -283,7 +438,8 @@ def run_stage7(output_dir: str = None) -> dict:
                     min_e = min(ebn.values())
                     recipe["synthesis_ratios"] = {m: max(1, round(v / min_e))
                                                   for m, v in ebn.items()}
-                    recipe["ratio_method"] = "EBN direct (Yuan 2024)"
+                    recipe["ratio_method"] = "EBN direct (Yuan 2024, single-monomer)"
+                    recipe["ratio_basis"] = "single-monomer"
             if "synthesis_ratios" not in recipe:      # contact-inverse (option/fallback)
                 contacts = {r["monomer"]: r.get("contact_frequency", 0)
                             for r in s4 if r.get("contact_frequency", 0) > 0}
@@ -291,15 +447,23 @@ def run_stage7(output_dir: str = None) -> dict:
                     max_c = max(contacts.values())
                     recipe["synthesis_ratios"] = {m: round(max_c / c, 1)
                                                   for m, c in contacts.items()}
-                    recipe["ratio_method"] = "inverse contact frequency"
+                    recipe["ratio_method"] = "inverse contact frequency (single-monomer)"
+                    recipe["ratio_basis"] = "single-monomer"
 
     # Default ratio if not computed
     if "synthesis_ratios" not in recipe:
         recipe["synthesis_ratios"] = {m: 4.0 for m, _ in top3}
         recipe["ratio_method"] = "default (1:4)"
+        recipe["ratio_basis"] = "default"
 
-    # ── Protocol (chemistry-specific) ──
-    best_monomer = top3[0][0] if top3 else "MAA"
+    # Co-monomer feed string when the mixture ratio spans ≥2 monomers, so the
+    # multi-monomer ratio is actually visible (protocol prose is single-monomer).
+    if len(recipe["synthesis_ratios"]) >= 2:
+        _co = sorted(recipe["synthesis_ratios"].items(), key=lambda x: -x[1])
+        recipe["comonomer_ratio"] = ("1 (template) : "
+                                     + " : ".join(f"{r} {m}" for m, r in _co))
+
+    # ── Protocol (chemistry-specific) ── (best_monomer set above)
     ratio = recipe["synthesis_ratios"].get(best_monomer, 4.0)
     xl = recipe["crosslinker"]
 
@@ -331,18 +495,77 @@ def run_stage7(output_dir: str = None) -> dict:
     # GAP 2: ionization / ion-pair speciation
     recipe["speciation"] = _ca.speciation_flags(TEMPLATE_SMILES, best_smi)
 
+    # Boronic-acid recognition is pH-gated: the monomer binds a cis-diol only as
+    # the tetrahedral BORONATE anion (above the boronic pKa), so a boronic-acid
+    # monomer MIP must be prepared/rebound in a basic buffer — otherwise the
+    # covalent diol recognition it was chosen for never forms.
+    try:
+        _mono_ion = _ca.detect_ionizable(best_smi) or []
+        _tmpl_ion = _ca.detect_ionizable(TEMPLATE_SMILES) or []
+    except Exception:
+        _mono_ion, _tmpl_ion = [], []
+    if "boronic_acid" in _mono_ion:
+        from rdkit import Chem as _Chem
+        _tm = _Chem.MolFromSmiles(TEMPLATE_SMILES) if TEMPLATE_SMILES else None
+        _has_diol = bool(_tm is not None and
+                         _tm.HasSubstructMatch(_Chem.MolFromSmarts("[CX4;!$(C=O)][OX2H].[CX4;!$(C=O)][OX2H]")))
+        recipe["boronic_recognition"] = {
+            "monomer_is_boronic": True,
+            "template_has_diol": _has_diol,
+            "condition": "prepare and rebind in a basic buffer (pH ≈ pKa_B + 1, "
+                         "typically pH 8–10) so the boronate anion forms",
+            "note": ("covalent cis-diol recognition — matched to this target"
+                     if _has_diol else
+                     "boronic monomer chosen but the template shows no cis-diol; "
+                     "confirm the intended (diol/anion) recognition mode"),
+        }
+        recipe.setdefault("warnings", []).append(
+            "Boronic-acid monomer: use a basic buffer (pH ~8–10) for imprinting "
+            "and rebinding, else the boronate–diol complex does not form.")
+        logger.info("  Boronic-acid monomer → basic-pH condition flagged")
+
+    # GAP 5b: template radical-chemistry compatibility. A radical-scavenging
+    # template (γ-terpinene's bis-allylic 1,4-diene, phenols, thiols, quinones,
+    # anilines) will NOT cure a free-radical (vinyl) MIP — it consumes the
+    # propagating radical. Gate the recommended chemistry so the recipe is
+    # actually synthesizable (matches the wet-lab γ-terpinene vs methyl-benzoate
+    # result: the former fails a MAA/EGDMA radical MIP, the latter works).
+    radical_compat = _ca.template_radical_compatibility(TEMPLATE_SMILES)
+    recipe["template_radical_compatibility"] = radical_compat
+    recipe.setdefault("warnings", [])
+    if chemistry == "free-radical" and radical_compat.get("severity") == "high":
+        _mtf = ", ".join(m["motif"] for m in radical_compat["motifs"])
+        warn = (f"⚠ SYNTHESIS FEASIBILITY: template '{TEMPLATE_NAME}' carries a "
+                f"radical-interfering motif ({_mtf}); the recommended FREE-RADICAL "
+                f"protocol will be RETARDED or fail to cure. "
+                f"{radical_compat['recommendation']}")
+        recipe["warnings"].append(warn)
+        recipe["synthesis_feasibility"] = "at-risk (radical inhibition)"
+        logger.warning(f"  {warn}")
+    elif chemistry == "free-radical" and radical_compat.get("severity") == "medium":
+        recipe["warnings"].append(
+            f"Template '{TEMPLATE_NAME}' may retard free-radical cure: "
+            f"{radical_compat['recommendation']}")
+        recipe["synthesis_feasibility"] = "caution"
+        logger.warning(f"  Template may retard free-radical cure ({TEMPLATE_NAME})")
+    else:
+        recipe.setdefault("synthesis_feasibility", "ok")
+
     # GAP 3: functional-monomer self-association (xTB dimerisation)
     try:
         recipe["self_association"] = _ca.dimerization_energy(best_smi)
     except Exception as e:
         recipe["self_association"] = {"error": str(e)}
 
-    # GAP 8: template bleeding / removability risk
+    # GAP 8: template bleeding / removability risk — from the winning
+    # COMBINATION's VIP (stage6 is keyed by combination label, not monomer).
     removal_rate = None
     vip_p = base / "stage6" / "stage6_vip.json"
-    if vip_p.exists():
+    if vip_p.exists() and best_combo is not None:
         try:
-            v = json.load(open(vip_p)).get(best_monomer, {})
+            _lbl2 = ("+".join(best_combo.get("selected", []))
+                     or f"pc{best_combo.get('rank')}")
+            v = json.load(open(vip_p)).get(_lbl2, {})
             removal_rate = (v.get("removal_rate")
                             or v.get("removal_success_rate"))
         except Exception:
@@ -400,6 +623,16 @@ def run_stage7(output_dir: str = None) -> dict:
                else "none (self-crosslinking)")
     xl_ratio_disp = f"{ratio * 5:.0f}" if xl else "0 (self-crosslinking)"
 
+    # Molar-ratio line: show the full co-monomer feed (mixture-derived) when the
+    # recipe spans ≥2 monomers, else the single Template:Monomer:XL line.
+    _co = recipe.get("comonomer_ratio")
+    if _co:
+        ratio_line = (f"Molar ratio (mixture-derived, {recipe.get('ratio_method','')}):\n"
+                      f"  {_co} : {xl_ratio_disp} {xl or ''}")
+    else:
+        ratio_line = ("Molar ratio (Template : Monomer : Cross-linker):\n"
+                      f"  1 : {ratio:.0f} : {xl_ratio_disp}")
+
     header = f"""=== MIP Synthesis Protocol ({chemistry}) ===
 
 Template: {TEMPLATE_NAME} ({TEMPLATE_SMILES})
@@ -407,9 +640,12 @@ Monomer:  {best_monomer} ({MONOMER_LIBRARY.get(best_monomer, '')})
 Cross-linker: {xl_disp}
 Solvent:  {solvent}
 
-Molar ratio (Template : Monomer : Cross-linker):
-  1 : {ratio:.0f} : {xl_ratio_disp}
+{ratio_line}
 """
+
+    # Template-removal wash matched to the TEMPLATE chemistry (never the template)
+    wash, wash_note = _wash_solvent(TEMPLATE_SMILES, TEMPLATE_NAME)
+    recipe["template_removal"] = {"wash": wash, "rationale": wash_note}
 
     if chemistry.startswith("sol-gel"):
         steps = f"""
@@ -419,9 +655,9 @@ Protocol (sol-gel / silane condensation):
 3. Add {xl} ({ratio * 5:.0f} mmol, e.g. TEOS), then H₂O ({ratio * 10:.0f} mmol) + HCl (cat., pH ≈ 3)
 4. Stir 2 h at RT (hydrolysis) → age/gel 24–72 h at 40°C (condensation)
 5. Dry to xerogel under vacuum at 60°C
-6. Remove template by washing with MeOH/AcOH (9:1), repeat until absent
+6. Remove template by washing with {wash}, repeat until absent ({wash_note})
 7. Dry under vacuum at 60°C"""
-        removal = "MeOH/AcOH washing"
+        removal = f"{wash} washing"
     elif chemistry.startswith("oxidative"):
         steps = f"""
 Protocol (oxidative / chemical polymerization):
@@ -432,9 +668,9 @@ Protocol (oxidative / chemical polymerization):
 4. Polymerize 4–24 h at 0–4°C
    NOTE: polypyrrole/polyaniline self-crosslink — no molecular cross-linker used
 5. Collect by filtration/centrifugation
-6. Remove template by washing with water/MeOH (+ mild acid) until absent
+6. Remove template by washing with {wash} until absent ({wash_note})
 7. Dry under vacuum at 40°C"""
-        removal = "water/MeOH washing"
+        removal = f"{wash} washing"
     else:  # free-radical (vinyl)
         chemistry = "free-radical"
         steps = f"""
@@ -443,11 +679,13 @@ Protocol (free-radical polymerization):
 2. Add {best_monomer} ({ratio:.0f} mmol) and stir for 30 min at RT
    → Pre-polymerization complex formation
 3. Add {xl} ({ratio * 5:.0f} mmol) and AIBN (0.1 mmol) as initiator
-4. Purge with N₂ for 10 min
+   (thermal; for a volatile/heat-sensitive template use a photo-initiator,
+    e.g. 0.05 mmol DMPA/Irgacure, and cure under UV at 0–10°C instead)
+4. Purge with N₂ for 10 min in a sealed vessel (exclude O₂ — it inhibits cure)
 5. Heat to 60°C for 24 h (free-radical polymerization)
-6. Remove template by Soxhlet extraction with MeOH/AcOH (9:1) for 48 h
+6. Remove template by Soxhlet extraction with {wash} for 48 h ({wash_note})
 7. Dry under vacuum at 40°C for 12 h"""
-        removal = "Soxhlet MeOH/AcOH"
+        removal = f"Soxhlet {wash}"
 
     # ── Design considerations (chemistry-aware corrections) ──
     _stoich = recipe.get("stoichiometry") or {}

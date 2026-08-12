@@ -36,6 +36,9 @@ from .config import (
     CAVITY_CORRECTION,
     CAVITY_ALPHA,
     CAVITY_BETA,
+    AFFINITY_MIN_KCAL,
+    RANK_AFFINITY_WEIGHT,
+    RANK_SELECTIVITY_WEIGHT,
     compute_molecular_volume,
 )
 
@@ -107,7 +110,8 @@ def select_global_porogen(template_dft: dict, solvents: dict,
                     pass
     monomers = [m for m in monomers if E[m]]
     if not monomers:
-        return (SYNTHESIS_SOLVENT, {"error": "no binding-energy matrix"})
+        return (SYNTHESIS_SOLVENT,
+                {"error": "no binding-energy matrix", "porogen": SYNTHESIS_SOLVENT})
     # solvents present for every candidate monomer (comparable set); else union
     solvent_names = [s for s in solvents if all(s in E[m] for m in monomers)]
     if not solvent_names:
@@ -116,7 +120,8 @@ def select_global_porogen(template_dft: dict, solvents: dict,
             alls.update(E[m].keys())
         solvent_names = sorted(alls)
     if not solvent_names:
-        return (SYNTHESIS_SOLVENT, {"error": "no solvent data"})
+        return (SYNTHESIS_SOLVENT,
+                {"error": "no solvent data", "porogen": SYNTHESIS_SOLVENT})
 
     # STEP 2: T_k by solvent-averaged binding (avoids circularity)
     Ebar = {m: sum(E[m][s] for s in solvent_names if s in E[m])
@@ -273,15 +278,37 @@ def compute_interferent_binding(template_smiles: str,
         with open(cache_path) as f:
             results = json.load(f)
 
+    # SMILES-stamp guard (mirrors stage2/crosslinker): a cached energy is keyed
+    # only on (interferent, monomer, solvent) presence, so a monomer/interferent
+    # SMILES edit would silently serve wrong-molecule energies (E_Int in the
+    # selectivity ΔE). Stamps live in a sibling file so the energy tree stays a
+    # plain {interf:{mono:{solvent: float}}} that compute_selectivity consumes.
+    stamp_path = Path(output_dir) / "stage3_interferent_stamps.json"
+    stamps = {}
+    if stamp_path.exists():
+        try:
+            stamps = json.load(open(stamp_path))
+        except Exception:
+            stamps = {}
+
+    def _skey(i, m):
+        return f"{i}\t{m}"
+
     tasks = []
     skip_count = 0
     for interf_name, interf_smiles in interferent_library.items():
         for m_name in monomer_names:
             m_smiles = monomer_library[m_name]
+            st = stamps.get(_skey(interf_name, m_name))
+            # stale if a stamp exists and either SMILES differs (legacy = no stamp
+            # → trusted, purge by hand). Applies to the whole (interf,mono) row.
+            stale = st is not None and (st.get("m") != m_smiles
+                                        or st.get("i") != interf_smiles)
             for s_name, eps in solvents.items():
-                if (interf_name in results
-                        and m_name in results[interf_name]
-                        and s_name in results[interf_name][m_name]):
+                cached = (interf_name in results
+                          and m_name in results.get(interf_name, {})
+                          and s_name in results[interf_name].get(m_name, {}))
+                if cached and not stale:
                     skip_count += 1
                 else:
                     tasks.append((interf_name, m_name, m_smiles, interf_smiles, s_name, eps))
@@ -318,6 +345,8 @@ def compute_interferent_binding(template_smiles: str,
                 if res["success"]:
                     results.setdefault(interf_name, {}).setdefault(m_name, {})[s_name] = \
                         res["bsse_dE_kcal"]
+                    stamps[_skey(interf_name, m_name)] = {"m": m_smiles,
+                                                          "i": interf_smiles}
                     logger.info(
                         f"  {interf_name}/{m_name}/{s_name}: "
                         f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
@@ -330,10 +359,14 @@ def compute_interferent_binding(template_smiles: str,
             # Incremental save after each pair
             with open(cache_path, "w") as f:
                 json.dump(results, f, indent=2)
+            with open(stamp_path, "w") as f:
+                json.dump(stamps, f, indent=2)
 
     # Final save
     with open(cache_path, "w") as f:
         json.dump(results, f, indent=2)
+    with open(stamp_path, "w") as f:
+        json.dump(stamps, f, indent=2)
     return results
 
 
@@ -439,6 +472,52 @@ def compute_selectivity(template_dft: dict, interferent_dft: dict,
 
     df = pd.DataFrame(rows)
     return df
+
+
+def _joint_rank(df):
+    """Rank monomers by a blend of absolute template affinity |E_Tar| and
+    selectivity avg_log_S, gating out weak binders (finding #6).
+
+    - viable = |E_Tar| ≥ AFFINITY_MIN_KCAL — the thermodynamic driving force to
+      form the pre-polymerization complex. Below this, high selectivity is moot
+      (the MIP won't imprint), so the monomer is demoted below all viable ones
+      and flagged. All monomers still pass to Stage 4 — the gate only reorders.
+    - viable set ordered by a min-max-normalized blend of affinity + selectivity.
+
+    Returns (ordered_names, detail_dict).
+    """
+    per = {}
+    for _, r in df.iterrows():
+        per[r["monomer"]] = {"E_Tar": float(r["E_Tar"]),
+                             "avg_log_S": float(r["avg_log_S"])}
+    if not per:
+        return [], {}
+    affs = [v["E_Tar"] for v in per.values()]
+    sels = [v["avg_log_S"] for v in per.values()]
+    a_lo, a_hi = min(affs), max(affs)
+    s_lo, s_hi = min(sels), max(sels)
+
+    def _nz(x, lo, hi):
+        return (x - lo) / (hi - lo) if hi > lo else 0.5
+
+    detail = {}
+    for m, v in per.items():
+        na = _nz(v["E_Tar"], a_lo, a_hi)
+        ns = _nz(v["avg_log_S"], s_lo, s_hi)
+        joint = RANK_AFFINITY_WEIGHT * na + RANK_SELECTIVITY_WEIGHT * ns
+        detail[m] = {
+            "E_Tar": round(v["E_Tar"], 3),
+            "avg_log_S": round(v["avg_log_S"], 3),
+            "affinity_norm": round(na, 3),
+            "selectivity_norm": round(ns, 3),
+            "joint_score": round(joint, 3),
+            "viable": bool(v["E_Tar"] >= AFFINITY_MIN_KCAL),
+        }
+    # viable first (True>False), then joint-score descending within each tier
+    ordered = sorted(detail,
+                     key=lambda m: (detail[m]["viable"], detail[m]["joint_score"]),
+                     reverse=True)
+    return ordered, detail
 
 
 def plot_results(df: pd.DataFrame, output_dir: str):
@@ -550,15 +629,24 @@ def run_stage3(template_smiles: str = None,
         # Plot
         plot_results(df, output_dir)
 
-        # Rank monomers by average selectivity (no filtering — all pass to Stage 4)
-        ranking = (df.groupby("monomer")["avg_log_S"]
-                   .mean()
-                   .sort_values(ascending=False))
-        top_names = ranking.index.tolist()  # All monomers, ranked
+        # Rank by JOINT affinity × selectivity (finding #6). Ranking on
+        # selectivity alone top-ranks a weakly-binding monomer whose MIP cannot
+        # imprint (no driving force to pre-organize) — logically wrong screening.
+        top_names, rank_detail = _joint_rank(df)
+        with open(out_path / "stage3_ranking.json", "w") as f:
+            json.dump(rank_detail, f, indent=2, default=str)
 
-        logger.info("Selectivity ranking (all passed to Stage 4):")
-        for i, (name, score) in enumerate(ranking.items(), 1):
-            logger.info(f"  {i}. {name:>10s}: avg_log(S) = {score:+.3f}")
+        logger.info("Joint affinity×selectivity ranking (all passed to Stage 4):")
+        for i, name in enumerate(top_names, 1):
+            d = rank_detail[name]
+            flag = "" if d["viable"] else "  ⚠ WEAK BINDER (imprinting unlikely)"
+            logger.info(f"  {i}. {name:>10s}: |E_Tar|={d['E_Tar']:.2f} "
+                        f"avg_log(S)={d['avg_log_S']:+.3f} "
+                        f"joint={d['joint_score']:.3f}{flag}")
+        _n_weak = sum(1 for d in rank_detail.values() if not d["viable"])
+        if _n_weak:
+            logger.warning(f"  {_n_weak} monomer(s) below |E_Tar|≥{AFFINITY_MIN_KCAL} "
+                           f"kcal/mol affinity gate — flagged as weak binders.")
     else:
         # No-interferent mode: skip selectivity, rank by DFT binding energy.
         be = {}
