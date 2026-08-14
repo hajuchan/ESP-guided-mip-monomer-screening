@@ -128,7 +128,7 @@ def _auto_workers():
 
 _env_workers = _os.environ.get("MIP_WORKERS")
 N_WORKERS = int(_env_workers) if (_env_workers and _env_workers != "0") else _auto_workers()
-N_GPU_WORKERS = int(_os.environ.get("MIP_GPU_WORKERS", "1"))  # limited by VRAM
+N_GPU_WORKERS = int(_os.environ.get("MIP_GPU_WORKERS", "2"))  # limited by VRAM
 USE_GPU      = True    # Use GPU acceleration when available
 from pathlib import Path as _Path
 OUTPUT_DIR   = str(_Path(__file__).resolve().parent.parent.parent / "results")

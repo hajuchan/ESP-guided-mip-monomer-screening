@@ -270,7 +270,10 @@ def _dft_optimize(atom_str: str, basis: str, eps: float,
     mf.with_solvent.eps = eps
 
     try:
-        mf = mf.to_gpu()
+        import cupy
+        gpu_id = _get_gpu_id_s2()
+        with cupy.cuda.Device(gpu_id):
+            mf = mf.to_gpu()
     except Exception:
         logger.info("  GPU not available for optimization, using CPU")
 
@@ -289,13 +292,36 @@ def _dft_optimize(atom_str: str, basis: str, eps: float,
         return atom_str
 
 
+_gpu_counter_s2 = 0
+_gpu_lock_s2 = None
+
+def _get_gpu_id_s2():
+    """Round-robin GPU assignment across available devices."""
+    import os
+    global _gpu_counter_s2, _gpu_lock_s2
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    devices = [d.strip() for d in visible.split(",") if d.strip()]
+    if len(devices) <= 1:
+        return 0
+    if _gpu_lock_s2 is None:
+        import threading
+        _gpu_lock_s2 = threading.Lock()
+    with _gpu_lock_s2:
+        idx = _gpu_counter_s2 % len(devices)
+        _gpu_counter_s2 += 1
+    return idx
+
+
 def _try_gpu(mf):
     """Attempt GPU acceleration via gpu4pyscf; fall back to CPU."""
     if not USE_GPU:
         return mf
     try:
-        mf = mf.to_gpu()
-        logger.debug("Using GPU-accelerated DFT")
+        import cupy
+        gpu_id = _get_gpu_id_s2()
+        with cupy.cuda.Device(gpu_id):
+            mf = mf.to_gpu()
+        logger.debug(f"Using GPU-accelerated DFT on device {gpu_id}")
     except Exception:
         logger.debug("GPU unavailable, using CPU")
     return mf
@@ -748,7 +774,10 @@ def generate_esp_map(atom_str: str, basis: str, eps: float,
         mf = PCM(mf)
         mf.with_solvent.eps = eps
         try:
-            mf = mf.to_gpu()
+            import cupy
+            gpu_id = _get_gpu_id_s2()
+            with cupy.cuda.Device(gpu_id):
+                mf = mf.to_gpu()
         except Exception:
             pass
         mf.kernel()

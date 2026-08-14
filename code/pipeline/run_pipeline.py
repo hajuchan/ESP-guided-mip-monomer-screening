@@ -285,18 +285,37 @@ def main():
     # process re-imports config with MIP_TEMPLATE set to the right target.
     if args.all_templates:
         import os as _os
+        import signal as _sig
         import subprocess as _sp
         from .config import TEMPLATES
         passthrough = [a for a in sys.argv[1:] if a != "--all-templates"]
         summary = {}
+        _current_proc = None
+
+        def _sigint_handler(sig, frame):
+            if _current_proc and _current_proc.poll() is None:
+                _current_proc.terminate()
+                _current_proc.wait(timeout=5)
+            sys.exit(130)
+
+        _sig.signal(_sig.SIGINT, _sigint_handler)
+
         for name in TEMPLATES:
             print("\n" + "█" * 60)
             print(f"█  TARGET: {name}  → results/{name.replace(' ', '_')}/")
             print("█" * 60, flush=True)
             env = {**_os.environ, "MIP_TEMPLATE": name}
-            proc = _sp.run([sys.executable, _os.path.abspath(__file__)] + passthrough,
-                           env=env)
-            summary[name] = proc.returncode
+            _current_proc = _sp.Popen(
+                [sys.executable, _os.path.abspath(__file__)] + passthrough,
+                env=env)
+            try:
+                _current_proc.wait()
+            except KeyboardInterrupt:
+                _current_proc.terminate()
+                _current_proc.wait(timeout=5)
+                print(f"\n[Pipeline] Ctrl+C — stopped at target: {name}")
+                sys.exit(130)
+            summary[name] = _current_proc.returncode
         print("\n=== Multi-target summary ===")
         for name, code in summary.items():
             print(f"  {name:20s} {'OK' if code == 0 else f'FAILED (rc={code})'}")

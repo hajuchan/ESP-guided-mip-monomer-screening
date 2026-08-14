@@ -291,6 +291,8 @@ def generate_surface_points(mol: Chem.Mol, density: float = 1.0) -> np.ndarray:
     return np.array(surface_pts)
 
 
+_dft_gpu_id = 0
+
 def _compute_dft_charges(mol_3d: "Chem.Mol") -> np.ndarray:
     """Compute B3LYP/6-311+G* Mulliken partial charges via GPU-accelerated DFT.
 
@@ -318,9 +320,16 @@ def _compute_dft_charges(mol_3d: "Chem.Mol") -> np.ndarray:
         mf.xc = "b3lyp"
 
         try:
-            mf_gpu = mf.to_gpu()
-            mf_gpu.kernel()
-            dm = mf_gpu.make_rdm1().get()  # cupy → numpy
+            import cupy
+            global _dft_gpu_id
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+            n_gpus = max(1, len([d for d in visible.split(",") if d.strip()]))
+            gpu_id = _dft_gpu_id % n_gpus
+            _dft_gpu_id += 1
+            with cupy.cuda.Device(gpu_id):
+                mf_gpu = mf.to_gpu()
+                mf_gpu.kernel()
+                dm = mf_gpu.make_rdm1().get()
             charges = mf.mulliken_pop(verbose=0, dm=dm)[1]
         except Exception:
             mf.kernel()
@@ -404,7 +413,9 @@ def _rotation_between_vectors(v1: np.ndarray, v2: np.ndarray):
 def generate_docked_orientations(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
                                   n_orientations: int = 100,
                                   surface_offset: float = 2.5,
-                                  random_seed: int = 42) -> list:
+                                  random_seed: int = 42,
+                                  precomputed_t_charges: np.ndarray = None,
+                                  precomputed_m_charges: np.ndarray = None) -> list:
     """100% ESP-guided orientation generation.
 
     All orientations use electrostatic complementarity (Singh 2012 principle):
@@ -425,12 +436,13 @@ def generate_docked_orientations(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
     m_centroid = m_pos.mean(axis=0)
     m_centered = m_pos - m_centroid
 
-    # DFT-level partial charges for ESP-guided placement
-    # B3LYP/6-311+G* Mulliken charges — much more accurate than xTB
-    # for heteroatom-rich molecules (B, Cl, etc.)
-    logger.info("    Computing DFT charges for ESP-guided docking...")
-    t_charges = _compute_dft_charges(template_mol)
-    m_charges = _compute_dft_charges(monomer_mol)
+    if precomputed_t_charges is not None and precomputed_m_charges is not None:
+        t_charges = precomputed_t_charges
+        m_charges = precomputed_m_charges
+    else:
+        logger.info("    Computing DFT charges for ESP-guided docking...")
+        t_charges = _compute_dft_charges(template_mol)
+        m_charges = _compute_dft_charges(monomer_mol)
 
     surface_pts = generate_surface_points(template_mol)
 
@@ -821,17 +833,22 @@ def _adaptive_n_orientations(template_mol: Chem.Mol, monomer_mol: Chem.Mol,
 # ═══════════════════════════════════════════════════════════════════
 
 def compute_binding_energy(monomer_name: str, monomer_smiles: str,
-                           template_mol: Chem.Mol) -> dict:
+                           template_mol: Chem.Mol,
+                           precomputed_t_charges: np.ndarray = None,
+                           precomputed_m_charges: np.ndarray = None) -> dict:
     """Compute xTB binding energy for one monomer via QuantumDock approach."""
     try:
-        return _compute_quantumdock(monomer_name, monomer_smiles, template_mol)
+        return _compute_quantumdock(monomer_name, monomer_smiles, template_mol,
+                                    precomputed_t_charges, precomputed_m_charges)
     except Exception as e:
         logger.warning(f"Failed for {monomer_name}: {e}")
         return {"name": monomer_name, "success": False, "error": str(e)}
 
 
 def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
-                         template_mol: Chem.Mol) -> dict:
+                         template_mol: Chem.Mol,
+                         precomputed_t_charges: np.ndarray = None,
+                         precomputed_m_charges: np.ndarray = None) -> dict:
     """QuantumDock-style: surface orientations → SP screen → optimize.
 
     If ENSEMBLE_DOCKING is True in config, generates multiple template
@@ -848,7 +865,8 @@ def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
         best_result = None
         for ci, conf_mol in enumerate(conformers):
             try:
-                result = _quantumdock_single(monomer_name, conf_mol, template_mol)
+                result = _quantumdock_single(monomer_name, conf_mol, template_mol, monomer_smiles,
+                                             precomputed_t_charges, precomputed_m_charges)
                 if result.get("success") and (
                     best_result is None or result["dE_kcal"] < best_result["dE_kcal"]
                 ):
@@ -861,11 +879,15 @@ def _compute_quantumdock(monomer_name: str, monomer_smiles: str,
             return best_result
 
     monomer_mol = smiles_to_mol3d(monomer_smiles)
-    return _quantumdock_single(monomer_name, monomer_mol, template_mol)
+    return _quantumdock_single(monomer_name, monomer_mol, template_mol, monomer_smiles,
+                               precomputed_t_charges, precomputed_m_charges)
 
 
 def _quantumdock_single(monomer_name: str, monomer_mol: Chem.Mol,
-                         template_mol: Chem.Mol) -> dict:
+                         template_mol: Chem.Mol,
+                         monomer_smiles: str = "",
+                         precomputed_t_charges: np.ndarray = None,
+                         precomputed_m_charges: np.ndarray = None) -> dict:
     """Single-conformer QuantumDock computation."""
 
     # Adaptive orientation count based on molecular size
@@ -876,6 +898,8 @@ def _quantumdock_single(monomer_name: str, monomer_mol: Chem.Mol,
         template_mol, monomer_mol,
         n_orientations=n_orient,
         surface_offset=DOCK_SURFACE_OFFSET,
+        precomputed_t_charges=precomputed_t_charges,
+        precomputed_m_charges=precomputed_m_charges,
     )
     n_esp = len(orientations)
 
@@ -1009,11 +1033,15 @@ def run_stage1(template_smiles: str = None,
     # SMILES-stamp guard: recompute a monomer whose cached entry was docked for a
     # different SMILES (e.g. APB para→meta). Legacy entries with no stamp are
     # trusted (skip) so the xTB cache isn't nuked wholesale — purge those by hand.
-    _existing_by_name = {r["name"]: r for r in existing_results if r.get("success")}
+    _existing_by_name = {r["name"]: r for r in existing_results}
 
     def _fresh(n, s):
         r = _existing_by_name.get(n)
-        return r is not None and r.get("smiles") in (None, s)
+        if r is None:
+            return False
+        if r.get("success"):
+            return r.get("smiles") in (None, s)
+        return True
 
     monomers_to_run = {n: s for n, s in monomer_library.items()
                        if not _fresh(n, s)}
@@ -1027,28 +1055,57 @@ def run_stage1(template_smiles: str = None,
 
     results = list(existing_results)
     if monomers_to_run:
-        with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
+        # Pre-compute DFT charges on GPU sequentially (avoids GPU contention)
+        logger.info("  Pre-computing DFT charges for all monomers (GPU, sequential)...")
+        t_charges = _compute_dft_charges(template_mol)
+        logger.info("    Template charges done")
+        monomer_charges = {}
+        for name, smiles in monomers_to_run.items():
+            try:
+                mol_3d = smiles_to_mol3d(smiles)
+                monomer_charges[name] = _compute_dft_charges(mol_3d)
+                logger.info(f"    {name} charges done")
+            except Exception as e:
+                logger.warning(f"    {name} DFT charges failed: {e}, will use xTB fallback")
+                monomer_charges[name] = None
+        logger.info("  DFT charges pre-computation complete, starting xTB docking...")
+
+        # Clean up CUDA state before forking workers to avoid
+        # inherited CuPy Event objects causing cleanup errors in children
+        import gc
+        try:
+            import cupy
+            cupy.get_default_memory_pool().free_all_blocks()
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+        gc.collect()
+
+        import multiprocessing as _mp
+        _ctx = _mp.get_context("forkserver")
+        with ProcessPoolExecutor(max_workers=N_WORKERS, mp_context=_ctx) as executor:
             futures = {
-                executor.submit(compute_binding_energy, name, smiles, template_mol): name
+                executor.submit(compute_binding_energy, name, smiles, template_mol,
+                                t_charges, monomer_charges.get(name)): name
                 for name, smiles in monomers_to_run.items()
             }
             for future in as_completed(futures):
                 res = future.result()
+                results.append(res)
+                with open(all_json, "w") as f:
+                    json.dump(results, f, indent=2)
                 if res["success"]:
-                    results.append(res)
                     logger.info(f"  {res['name']:>10s}: dE = {res['dE_kcal']:+.3f} kcal/mol")
-                    # Save incrementally
-                    with open(all_json, "w") as f:
-                        json.dump(results, f, indent=2)
                 else:
                     logger.warning(f"  {res['name']:>10s}: FAILED — {res.get('error', '?')}")
 
-    results.sort(key=lambda r: r["dE_kcal"])
+    successful = [r for r in results if r.get("success")]
+    successful.sort(key=lambda r: r["dE_kcal"])
 
     # Filter: only monomers with negative binding energy (actual binding)
     # dE < 0 means the complex is more stable than isolated molecules
-    bound = [r for r in results if r["dE_kcal"] < 0]
-    unbound = [r for r in results if r["dE_kcal"] >= 0]
+    bound = [r for r in successful if r["dE_kcal"] < 0]
+    unbound = [r for r in successful if r["dE_kcal"] >= 0]
     if unbound:
         logger.info(f"  Filtered out {len(unbound)} non-binding monomers (dE >= 0): "
                     f"{[r['name'] for r in unbound]}")

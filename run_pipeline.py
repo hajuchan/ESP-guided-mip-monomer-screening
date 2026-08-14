@@ -6,13 +6,14 @@ config-driven 7-stage 워크플로. 루트에서 `python run_pipeline.py`로 실
 결과는 results/<TEMPLATE_NAME>/stage1..7/ 에 저장됩니다 (실행 위치 무관).
 
 준비:
-    conda activate MIPscreen        # 또는 사용 중인 env
-    cd MIP_simulation
+    conda activate mip_pipeline
+    cd ESP-guided-mip-monomer-screening
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STAGE 실행 (--stage)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     python run_pipeline.py                    # 전체 (1→2→3→4→5→6→7) [기본]
+    python run_pipeline.py --stage all        # 위와 동일 (명시적)
     python run_pipeline.py --stage 1          # GFN2-xTB 도킹 + 포즈 앙상블
     python run_pipeline.py --stage 2          # DFT 단일점(ωB97X-D/M-V+PCM+BSSE//xTB)
     python run_pipeline.py --stage 3          # 전역 porogen 선택 + 랭킹 + 가교제 스크리닝
@@ -27,10 +28,19 @@ STAGE 실행 (--stage)
 다중 TARGET (--all-templates / MIP_TEMPLATE)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     python run_pipeline.py --all-templates                 # config.TEMPLATES 전부 순차
+    python run_pipeline.py --all-templates --stage all     # 위와 동일 (명시적)
     python run_pipeline.py --all-templates --stage 5       # 특정 stage만 전 target
     MIP_TEMPLATE="Methyl Benzoate" python run_pipeline.py  # 단일 target을 env로 선택
   * --all-templates는 target별 subprocess로 격리 → results/<TEMPLATE_NAME>/ 분리 저장.
+  * 현재 등록된 TEMPLATES: Gamma-terpinene, Acetic Acid, Methyl Benzoate
   * config.TEMPLATE_NAME 기본값을 바꿔도 됨 (또는 위 env). --output-dir와 병용 금지.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+빠른 시작 (Quick Start)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    conda activate mip_pipeline
+    cd ESP-guided-mip-monomer-screening
+    CUDA_VISIBLE_DEVICES=0 python run_pipeline.py --all-templates --stage all
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 VIP 재분석/연장 (BIO phase5) — MD 재실행 없이 지표 개선
