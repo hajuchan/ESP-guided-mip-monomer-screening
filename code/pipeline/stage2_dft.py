@@ -401,12 +401,21 @@ def dft_energy(atom_str: str, basis: str, eps: float,
     except AttributeError:
         pass
 
+    mf.max_cycle = 100
+    mf.conv_tol = 1e-9
+
     # GPU acceleration
     if use_gpu:
         mf = _try_gpu(mf)
 
     try:
         mf.kernel()
+        if not mf.converged:
+            logger.warning(f"  SCF not converged after {mf.max_cycle} cycles, "
+                           f"retrying on CPU with SOSCF")
+            _free_gpu_memory()
+            return dft_energy(atom_str, basis, eps, tmpdir,
+                              use_gpu=False, functional=functional)
     except Exception as e:
         if use_gpu and _is_gpu_oom(e):
             logger.warning(f"  GPU OOM ({type(e).__name__}); retrying this "
@@ -449,11 +458,19 @@ def dft_energy_ghost(real_atom_str: str, ghost_atom_str: str,
         mf.with_solvent.method = 'IEF-PCM'
     except AttributeError:
         pass
+    mf.max_cycle = 100
+    mf.conv_tol = 1e-9
+
     if use_gpu:
         mf = _try_gpu(mf)
 
     try:
         mf.kernel()
+        if not mf.converged:
+            logger.warning(f"  BSSE SCF not converged, retrying on CPU with SOSCF")
+            _free_gpu_memory()
+            return dft_energy_ghost(real_atom_str, ghost_atom_str, basis, eps,
+                                    tmpdir, use_gpu=False, functional=functional)
     except Exception as e:
         if use_gpu and _is_gpu_oom(e):
             logger.warning(f"  GPU OOM ({type(e).__name__}) in BSSE term; "
@@ -704,7 +721,9 @@ def run_stage2(template_smiles: str = None,
                 logger.warning(f"  {name}: failed to load Stage 1 complex: {e}")
 
     if pairs_to_run:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        import multiprocessing as _mp
+        _ctx = _mp.get_context("forkserver")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=_ctx) as executor:
             futures = {}
             for m_name, m_smiles, s_name, eps in pairs_to_run:
                 # Use prebuilt complex from Stage 1 if available
