@@ -737,10 +737,13 @@ def run_stage2(template_smiles: str = None,
                     "+x", output_dir,  # direction ignored when prebuilt is provided
                     prebuilt,
                 )
-                futures[fut] = (m_name, s_name)
+                futures[fut] = (m_name, s_name, m_smiles)
 
             for future in as_completed(futures):
-                m_name, s_name = futures[future]
+                # carry m_smiles per-future: the submit-loop variable holds only
+                # the LAST pair's SMILES, so stamping with it mislabels every
+                # entry → the SMILES guard then recomputes everything each run.
+                m_name, s_name, m_smiles = futures[future]
                 res = future.result()
                 if res["success"]:
                     results.setdefault(m_name, {})[s_name] = {
