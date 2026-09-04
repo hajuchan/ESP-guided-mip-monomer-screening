@@ -722,46 +722,104 @@ def run_stage2(template_smiles: str = None,
 
     if pairs_to_run:
         import multiprocessing as _mp
+        from concurrent.futures.process import BrokenProcessPool
         _ctx = _mp.get_context("forkserver")
-        with ProcessPoolExecutor(max_workers=max_workers, mp_context=_ctx) as executor:
-            futures = {}
-            for m_name, m_smiles, s_name, eps in pairs_to_run:
-                # Use prebuilt complex from Stage 1 if available
-                prebuilt = complex_mol_map.get(m_name)
-                if prebuilt is not None:
-                    logger.info(f"  {m_name}/{s_name}: using Stage 1 optimized complex")
+        failed = set()          # (monomer, solvent) pairs that crash even in isolation
 
-                fut = executor.submit(
-                    compute_dft_binding,
-                    m_name, m_smiles, template_smiles, s_name, eps,
-                    "+x", output_dir,  # direction ignored when prebuilt is provided
-                    prebuilt,
-                )
-                futures[fut] = (m_name, s_name, m_smiles)
-
-            for future in as_completed(futures):
-                # carry m_smiles per-future: the submit-loop variable holds only
-                # the LAST pair's SMILES, so stamping with it mislabels every
-                # entry → the SMILES guard then recomputes everything each run.
-                m_name, s_name, m_smiles = futures[future]
-                res = future.result()
-                if res["success"]:
-                    results.setdefault(m_name, {})[s_name] = {
-                        "raw_dE": res["raw_dE_kcal"],
-                        "bsse_dE": res["bsse_dE_kcal"],
-                        "bsse_correction": res["bsse_correction_kcal"],
-                        "smiles": m_smiles,  # stamp for the SMILES-change guard
-                    }
-                    logger.info(
-                        f"  {m_name:>10s}/{s_name:<15s}: "
+        def _store(m_name, s_name, m_smiles, res):
+            """Persist one successful DFT result (incremental save)."""
+            if not res.get("success"):
+                logger.warning(f"  {m_name}/{s_name}: FAILED")
+                return
+            results.setdefault(m_name, {})[s_name] = {
+                "raw_dE": res["raw_dE_kcal"],
+                "bsse_dE": res["bsse_dE_kcal"],
+                "bsse_correction": res["bsse_correction_kcal"],
+                "smiles": m_smiles,  # stamp for the SMILES-change guard
+            }
+            logger.info(f"  {m_name:>10s}/{s_name:<15s}: "
                         f"raw={res['raw_dE_kcal']:+.3f}, "
-                        f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol"
-                    )
-                    # Save incrementally after each pair
-                    with open(result_file, "w") as f:
-                        json.dump(results, f, indent=2)
-                else:
-                    logger.warning(f"  {m_name}/{s_name}: FAILED")
+                        f"bsse={res['bsse_dE_kcal']:+.3f} kcal/mol")
+            with open(result_file, "w") as f:
+                json.dump(results, f, indent=2)
+
+        def _remaining():
+            out = []
+            for m_name, m_smiles, s_name, eps in pairs_to_run:
+                done = (results.get(m_name, {}) or {}).get(s_name)
+                if (done and done.get("bsse_dE") is not None) or (m_name, s_name) in failed:
+                    continue
+                out.append((m_name, m_smiles, s_name, eps))
+            return out
+
+        # A DFT worker can die HARD (GPU-OOM / segfault / OOM-killer SIGKILL) —
+        # not a catchable Python exception, so ProcessPoolExecutor marks the whole
+        # pool broken and every pending future raises BrokenProcessPool, which
+        # previously crashed the ENTIRE stage (all monomers, all targets). Instead:
+        # recreate the pool and retry only the UNfinished pairs (completed ones are
+        # saved incrementally); after repeated crashes halve the workers, then drop
+        # to serial one-pair-per-pool so a crash costs only that single molecule.
+        workers = max_workers
+        restarts = 0
+        MAX_RESTARTS = 8
+        while True:
+            pending = _remaining()
+            if not pending:
+                break
+            restarts += 1
+            if restarts > MAX_RESTARTS:
+                logger.error(f"  Stage 2: {len(pending)} pair(s) still crashing after "
+                             f"{MAX_RESTARTS} pool restarts — leaving uncomputed")
+                break
+
+            if workers <= 1 or restarts >= 3:
+                # Isolate: one pair per fresh single-worker pool. A crash here loses
+                # only this molecule (marked failed, skipped), never the whole stage.
+                logger.warning(f"  Stage 2: isolating {len(pending)} remaining pair(s) "
+                               f"one-at-a-time (worker crashes suspected)")
+                for m_name, m_smiles, s_name, eps in pending:
+                    try:
+                        with ProcessPoolExecutor(max_workers=1, mp_context=_ctx) as ex:
+                            res = ex.submit(
+                                compute_dft_binding, m_name, m_smiles, template_smiles,
+                                s_name, eps, "+x", output_dir,
+                                complex_mol_map.get(m_name)).result()
+                        _store(m_name, s_name, m_smiles, res)
+                    except Exception as e:
+                        logger.warning(f"  {m_name}/{s_name}: DFT worker crashed "
+                                       f"({type(e).__name__}) — skipping this pair")
+                        failed.add((m_name, s_name))
+                break
+
+            try:
+                with ProcessPoolExecutor(max_workers=workers, mp_context=_ctx) as executor:
+                    futures = {}
+                    for m_name, m_smiles, s_name, eps in pending:
+                        prebuilt = complex_mol_map.get(m_name)
+                        if prebuilt is not None:
+                            logger.info(f"  {m_name}/{s_name}: using Stage 1 optimized complex")
+                        fut = executor.submit(
+                            compute_dft_binding, m_name, m_smiles, template_smiles,
+                            s_name, eps, "+x", output_dir, prebuilt)
+                        futures[fut] = (m_name, s_name, m_smiles)
+
+                    for future in as_completed(futures):
+                        m_name, s_name, m_smiles = futures[future]
+                        try:
+                            res = future.result()
+                        except BrokenProcessPool:
+                            raise                       # → recreate the pool below
+                        except Exception as we:
+                            logger.warning(f"  {m_name}/{s_name}: worker error "
+                                           f"({type(we).__name__}: {we}) — skipping")
+                            failed.add((m_name, s_name))
+                            continue
+                        _store(m_name, s_name, m_smiles, res)
+            except BrokenProcessPool:
+                workers = max(1, workers // 2)
+                logger.warning(f"  Stage 2: DFT worker pool crashed (likely GPU-OOM / "
+                               f"segfault); restart {restarts} with {workers} worker(s)")
+                continue
 
     # Final save
     with open(result_file, "w") as f:
